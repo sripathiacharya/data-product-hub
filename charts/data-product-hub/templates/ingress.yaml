@@ -1,0 +1,39 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "data-product-hub.fullname" . }}
+  labels:
+    {{- include "data-product-hub.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+
+  {{- if and .Values.ingress.tls .Values.ingress.host }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        - {{ $.Values.ingress.host }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.basePath | default "/data-product-hub" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "data-product-hub.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

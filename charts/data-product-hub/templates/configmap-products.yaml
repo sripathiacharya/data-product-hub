@@ -1,0 +1,25 @@
+{{- range .Values.products.fromFiles }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "data-product-hub.fullname" $ }}-product-{{ .name }}
+  labels:
+    {{- include "data-product-hub.labels" $ | nindent 4 }}
+data:
+  {{ .name }}.yaml: |
+{{ ($.Files.Get .file) | indent 4 }}
+---
+{{- end }}
+
+{{- range $name, $value := .Values.products.inline }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "data-product-hub.fullname" $ }}-product-{{ $name }}
+  labels:
+    {{- include "data-product-hub.labels" $ | nindent 4 }}
+data:
+  {{ $name }}.yaml: |
+{{ $value | indent 4 }}
+---
+{{- end }}

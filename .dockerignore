@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Environments
+.env
+.venv/
+env/
+venv/
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Tests (not needed in runtime image)
+tests/
+
+# Logs
+*.log
+
+# OS crap
+.DS_Store
+Thumbs.db

@@ -1,0 +1,32 @@
+[project]
+name = "data-product-hub"
+version = "0.1.0"
+description = "Config-driven data product hub with OData-style query API."
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Your Name" }
+]
+
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "pydantic>=2.0",
+  "pandas",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "httpx",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

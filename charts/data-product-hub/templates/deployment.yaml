@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "data-product-hub.fullname" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "data-product-hub.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "data-product-hub.name" . }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            # optional override for config dir in your app
+            - name: CONFIG_DIR
+              value: /app/config/data-products
+          volumeMounts:
+            - name: product-config
+              mountPath: {{ .Values.config.mountPath | default "/app/config/data-products" }}
+            {{- if .Values.data.enabled }}
+            - name: data
+              mountPath: {{ .Values.data.mountPath | default "/app/sample-data" }}
+            {{- end }}
+      volumes:
+        - name: product-config
+          projected:
+            sources:
+              {{- range .Values.products.fromFiles }}
+              - configMap:
+                  name: {{ include "data-product-hub.fullname" $ }}-product-{{ .name }}
+              {{- end }}
+              {{- range $name, $_ := .Values.products.inline }}
+              - configMap:
+                  name: {{ include "data-product-hub.fullname" $ }}-product-{{ $name }}
+              {{- end }}
+        {{- if .Values.data.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ if .Values.data.pvc.name }}{{ .Values.data.pvc.name }}{{ else }}{{ include "data-product-hub.fullname" . }}-data{{ end }}
+        {{- end }}

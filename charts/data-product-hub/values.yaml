@@ -1,0 +1,149 @@
+# Number of API replicas
+replicaCount: 1
+
+image:
+  repository: your-registry/data-product-hub
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Image pull secrets (if using a private registry)
+imagePullSecrets: []
+  # - name: my-registry-secret
+
+# Pod-level annotations/labels if needed
+podAnnotations: {}
+podLabels: {}
+
+# Pod security context
+podSecurityContext: {}
+  # fsGroup: 1000
+
+# Container security context
+securityContext: {}
+  # runAsUser: 1000
+  # runAsNonRoot: true
+
+service:
+  type: ClusterIP
+  port: 80        # external service port
+  targetPort: 8000 # container port (where uvicorn listens)
+
+ingress:
+  enabled: true
+
+  # Optional: IngressClass, e.g. "nginx"
+  className: ""
+
+  annotations: {}
+    # For nginx, you usually don't need rewrite when using path prefixes.
+    # nginx.ingress.kubernetes.io/rewrite-target: /
+
+  # Base path under which the API will be exposed.
+  # e.g. /data-product-hub → /data-product-hub/odata/...
+  basePath: /data-product-hub
+
+  # Optional hostname. Leave empty for "all hosts".
+  host: ""
+  # host: "data-product-hub.local"  # if you ever want host-based later
+
+  tls: []
+  # - secretName: data-product-hub-tls
+  #   hosts:
+  #     - data-product-hub.local
+
+
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 256Mi
+  # limits:
+  #   cpu: 500m
+  #   memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------
+# Data product configuration
+# ---------------------------------------------------------
+
+# Directory inside the container where the product ConfigMap is mounted.
+# This must match the CONFIG_DIR env + volumeMount path in deployment.yaml.
+config:
+  mountPath: /app/config/data-products
+
+# Extra product definitions that will be added as files in the ConfigMap.
+# Key = file stem, value = YAML file content.
+extraProducts: {}
+  # example-product: |
+  #   id: example-product
+  #   route: example-product
+  #   description: "Example product defined via Helm values."
+  #
+  #   backend:
+  #     engine: parquet_join
+  #     sources:
+  #       base:
+  #         path: sample-data/example.parquet
+  #
+  #   entity:
+  #     name: ExampleEntity
+  #     key_column: id
+  #     columns:
+  #       - name: id
+  #         type: string
+  #         generated: true
+  #       - name: value
+  #         type: string
+  #
+  #   odata:
+  #     filterable: [value]
+  #     orderable: [value]
+
+# ---------------------------------------------------------
+# Data storage configuration
+# ---------------------------------------------------------
+
+data:
+  # If true, create and mount a PVC for /app/sample-data
+  enabled: false
+
+  # Only used if data.enabled = true
+  pvc:
+    # name will default to "<release-name>-data" if empty, set explicitly if needed
+    name: ""
+    storageClassName: ""
+    accessModes:
+      - ReadWriteMany
+    size: 10Gi
+
+  # If you don't use a PVC and rely on baked-in sample-data in the image,
+  # make sure the deployment still mounts /app/sample-data correctly if needed.
+  mountPath: /app/sample-data
+
+# ---------------------------------------------------------
+# Environment variables
+# ---------------------------------------------------------
+
+env:
+  # CONFIG_DIR tells the app where to look for data-product YAMLs.
+  # This should match config.mountPath above.
+  CONFIG_DIR: /app/config/data-products
+
+  # Additional env vars can be defined as a list of name/value pairs.
+  extra: []
+    # - name: LOG_LEVEL
+    #   value: debug
+
+products:
+  fromFiles:
+    - name: southafrica-scheduled-outage
+      file: config/data-products/southafrica-scheduled-outage.yaml
+
+    # later you can add more:
+    # - name: some-other-dataset
+    #   file: config/data-products/some-other-dataset.yaml
+
+  inline: {}  # keep this empty if you don’t want inline configs

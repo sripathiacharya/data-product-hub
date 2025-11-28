@@ -1,4 +1,14 @@
-version: '3.9'
 services:
   api:
     build: .
+    container_name: data-product-hub-api
+    ports:
+      - "8000:8000"
+    # Mount config & data so you can change YAML/data without rebuilding image
+    volumes:
+      - ./config:/app/config
+      - ./sample-data:/app/sample-data
+    environment:
+      PYTHONUNBUFFERED: "1"
+    # Restart on failure during development
+    restart: unless-stopped
