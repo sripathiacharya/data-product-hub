@@ -8,7 +8,7 @@ import kopf
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 
-GROUP = os.getenv("DATA_PRODUCT_CRD_GROUP", "sripathiacharya.gitbub.io")
+GROUP = os.getenv("DATA_PRODUCT_CRD_GROUP", "sripathiacharya.github.io")
 VERSION = os.getenv("DATA_PRODUCT_CRD_VERSION", "v1alpha1")
 PLURAL = os.getenv("DATA_PRODUCT_CRD_PLURAL", "dataproducts")
 

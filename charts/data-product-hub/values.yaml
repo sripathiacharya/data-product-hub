@@ -6,7 +6,7 @@ imagePullSecrets:
   - name: ghcr-auth
 
 crd:
-  group: sripathiacharya.gitbub.io
+  group: sripathiacharya.github.io
   kind: DataProduct
   plural: dataproducts
   singular: dataproduct
