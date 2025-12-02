@@ -1,317 +1,316 @@
-# 📦 Data Product Hub (Mini OData Engine)
+# 📦 Data Product Hub — Operator-Driven OData Engine
 
-**Data Product Hub** is a lightweight data-serving engine that lets you expose curated datasets using **YAML configuration**, **Parquet files**, and an **OData-style REST API**.
+Data Product Hub is a lightweight, Kubernetes-native engine for publishing data products using **OData-style REST APIs**.
+It is designed for **cloud platforms**, **data spaces**, and **internal developer portals**.
 
-It supports:
+## ✨ Key Features
 
-* 🧩 **Multiple data products**
-* 🔗 **Joins across backend sources** (e.g., `areas + schedule`)
-* 📁 **Data stored as Parquet files**
-* 📜 **Declarative YAML config** for each product
-* 🛠️ **OData-style API**: `$select`, `$top`, `$skip`, `$orderby`, pagination
-* 📊 **Raw source access** (e.g., `/areas`, `/schedule`)
-* 🐳 **Docker + Podman builds**
-* ☸️ **Helm chart for Kubernetes deployment**
+### **Kubernetes-first design**
+
+* Data Products are defined declaratively using a **Custom Resource Definition (CRD)**.
+* A **Kopf-based Operator** reconciles DataProducts into actual runtime resources:
+
+  * Shared or dedicated engine deployments
+  * Per-product Ingress routes
+  * `ConfigMap` metadata for the engine
+  * (future) security, QoS, tenancy, etc.
+
+### **OData-style API**
+
+Each dataset is automatically exposed as:
+
+```
+/odata/<data-product-id>
+```
+
+Supports:
+
+* `$top`, `$skip`, `$orderby`
+* `$select`
+* Pagination + count
+* Multiple backend sources
+* Join logic
+* Auto-generated IDs
+
+### **Pluggable backend engine**
+
+* Current backend: **Parquet + DuckDB**
+* Local or PVC-mounted data
+* Per-product joins and rename mappings
+
+### **Flexible deployment modes**
+
+* **Shared engine** → Many data products served by one API engine
+* **Dedicated engine** → One engine per data product (strong isolation)
 
 ---
 
-## ✨ How it Works
+# 🏗️ Architecture
 
-Each data product has:
-
-1. A YAML configuration
-2. One or more Parquet data sources
-3. A route at `/odata/{product}`
-4. Optional joins between sources
-
-The engine loads all configs on startup and publishes each dataset as a REST data API.
+```
+       +-----------------------------+
+       |     DataProduct (CRD)       |
+       |  apiVersion: <group>/<ver>  |
+       |  kind: DataProduct          |
+       +--------------+--------------+
+                      |  Reconcile
+                      v
+              +------------------+
+              |     Operator     |
+              +------------------+
+               | configmap update       ┌─────────────┐
+               | engine reload           │ PVC-mounted │
+               | ingress creation        │   Parquet   │
+               v                         └─────────────┘
+       +-----------------------------------------------+
+       |                Shared Engine                  |
+       |  loads dataproducts.json → registry          |
+       |  GET /odata/<dp> → OData endpoint            |
+       +-----------------------------------------------+
+```
 
 ---
 
-# 🗂️ Project Structure
+# 📁 Repository Layout (New)
 
 ```
 data-product-hub/
 │
 ├── src/
-│   ├── data_product_hub/
-│   │   ├── main.py
-│   │   ├── ...
-│   └── odata/
-│       ├── router.py
-│       ├── registry.py
-│       └── ...
-│
-├── config/
-│   └── data-products/
-│       └── southafrica-scheduled-outage.yaml
-│
-├── sample-data/
-│   └── south-africa-outages/
-│       ├── areas.parquet
-│       └── schedule.parquet
-│
-├── tests/
-│   └── test_southafrica_product.py
+│   ├── engine/           # OData engine
+│   └── operator/         # CRD reconciler
 │
 ├── charts/
 │   └── data-product-hub/
-│       ├── templates/
-│       ├── values.yaml
-│       └── Chart.yaml
+│       ├── templates/    # CRD, operator, engine, ingress
+│       └── values.yaml   # CRD group/name, PVC, images
 │
-├── Dockerfile
+├── examples/
+│   └── southafrica-scheduled-outage/
+│       ├── data-product.yaml   # example CR
+│       ├── sample-data/        # parquet
+│
+├── Dockerfile.engine
+├── Dockerfile.operator
 └── README.md
 ```
 
 ---
 
-# 📝 Example Data Product Config (YAML)
+# 📝 Defining a Data Product (CRD)
 
-`config/data-products/southafrica-scheduled-outage.yaml`
+Example: `data-product.yaml`
 
 ```yaml
-id: southafrica-scheduled-outage-dataset
-route: southafrica-scheduled-outage-dataset
-description: SA outage dataset from areas × schedule join
+apiVersion: openness.ecostruxure.se.app/v1alpha1
+kind: DataProduct
+metadata:
+  name: southafrica-scheduled-outage-dataset
 
-entity:
-  name: Outage
+spec:
+  description: "Scheduled outage plan with joined metadata"
+  deploymentMode: Shared   # or Dedicated
 
-backend:
-  sources:
-    areas:
-      path: areas.parquet
-      format: parquet
-    schedule:
-      path: schedule.parquet
-      format: parquet
-  
-  joins:
-    - left: areas
-      right: schedule
-      on:
-        - provider
-        - block
+  api:
+    path: /southafrica-scheduled-outage-dataset
+    version: v1
+    protocol: odata
+    resource: SouthAfricaScheduledOutage
 
-odata:
-  default_top: 100
-  max_top: 1000
+  backend:
+    engine: parquet_join
+
+    sources:
+      areas:
+        path: examples/southafrica-scheduled-outage/sample-data/areas.parquet
+        rename:
+          suburb: suburb
+          city: city
+          province: province
+          provider: provider
+          block: block
+
+      schedule:
+        path: examples/southafrica-scheduled-outage/sample-data/schedule.parquet
+        rename:
+          date: day
+          start: start_time
+          end: end_time
+          stage: stage
+
+    joins:
+      - left: areas
+        right: schedule
+        on: [provider, block]
+
+  entity:
+    name: SouthAfricaScheduledOutage
+    key_column: id
+    columns:
+      - name: id
+        type: string
+        generated: true
+      - name: province
+        type: string
+      - name: city
+        type: string
+      - name: suburb
+        type: string
+      - name: day
+        type: int
+      - name: stage
+        type: int
+
+  odata:
+    max_top: 1000
+    default_top: 100
+```
+
+Apply it:
+
+```bash
+kubectl apply -f data-product.yaml -n data-products
 ```
 
 ---
 
-# 🚀 Running Locally
+# ⚙️ What the Operator Does
 
-## 1️⃣ Install dependencies
+### **Shared mode**
 
-```sh
-pip install -r requirements.txt
+1. Reads CR
+2. Updates the metadata ConfigMap (`data-product-hub-metadata`)
+3. Calls engine reload: `/internal/reload-config`
+4. Creates Ingress:
+
+```
+/odata/southafrica-scheduled-outage-dataset
 ```
 
-(or, if using pyproject)
+### **Dedicated mode**
 
-```sh
-pip install .
+1. Generates a Deployment + Service just for this product
+2. Creates dedicated metadata ConfigMap
+3. Creates dedicated Ingress
+4. Deletes all these automatically on `kubectl delete dp <name>`
+
+---
+
+# 🚀 Running Locally (Operator-Free)
+
+You can simulate a DataProduct without Kubernetes.
+
+### Option A — Load a CR directly
+
+```bash
+export DP_LOCAL_CR=examples/southafrica-scheduled-outage/data-product.yaml
+uvicorn engine.main:app --app-dir src --reload
+```
+
+Engine logs:
+
+```
+[local] Loaded DataProduct CR from examples/... (route=southafrica-scheduled-outage-dataset)
+```
+
+### Option B — Load a metadata JSON file
+
+```bash
+export DP_METADATA_PATH=./local-dataproducts.json
+uvicorn engine.main:app --app-dir src --reload
 ```
 
 ---
 
-## 2️⃣ Run using Uvicorn
+# 🔌 Querying Data Products
 
-```sh
-python -m uvicorn data_product_hub.main:app --reload --app-dir src
-```
-
-You should see:
+### Base:
 
 ```
-Loaded config southafrica-scheduled-outage-dataset
-join: areas -> schedule on ['provider','block']
+GET /odata/<product>
 ```
 
-Open:
-
-👉 [http://127.0.0.1:8000/odata/southafrica-scheduled-outage-dataset](http://127.0.0.1:8000/odata/southafrica-scheduled-outage-dataset)
-👉 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
----
-
-# 🧪 Running Tests
-
-Tests live under `/tests`.
-
-Run them with:
-
-```sh
-python -m pytest
-```
-
-If missing:
-
-```sh
-pip install pytest httpx
-```
-
----
-
-# 🌐 OData-Style API
-
-The engine exposes classic OData query parameters.
-
-## Available parameters
-
-| Parameter  | Meaning                               |
-| ---------- | ------------------------------------- |
-| `$select`  | Column projection                     |
-| `$top`     | Page size (auto-clamped by `max_top`) |
-| `$skip`    | Offset                                |
-| `$orderby` | Sort ascending/descending             |
-| `$filter`  | (accepted but ignored for now)        |
-
----
-
-## 🧩 Joined Dataset Endpoint
+### Examples:
 
 ```
-GET /odata/{product}
+GET /odata/southafrica-scheduled-outage-dataset?$top=10
+GET /odata/southafrica-scheduled-outage-dataset?$orderby=day desc
+GET /odata/southafrica-scheduled-outage-dataset?$select=suburb,stage
 ```
 
-Example:
+Pagination:
 
 ```
-GET /odata/southafrica-scheduled-outage-dataset?$top=5
-```
-
-Response:
-
-```json
 {
-  "@odata.context": "/odata/$metadata#southafrica-scheduled-outage-dataset",
   "@odata.count": 42333,
-  "value": [ ...5 rows... ],
-  "@odata.nextLink": "/odata/southafrica-scheduled-outage-dataset?$skip=5&$top=5"
-}
-```
-
----
-
-## 🗄️ Raw Backend Source Access
-
-```
-GET /odata/{product}/{source}
-```
-
-Example:
-
-```
-GET /odata/southafrica-scheduled-outage-dataset/areas?$top=10
-```
-
-Identical response structure:
-
-```json
-{
-  "@odata.context": "/odata/$metadata#southafrica-scheduled-outage-dataset/areas",
-  "@odata.count": 12000,
   "value": [ ... ],
-  "@odata.nextLink": "/odata/...?$skip=10&$top=10"
+  "@odata.nextLink": "/odata/...?$skip=100&$top=100"
 }
 ```
 
 ---
 
-# 🐳 Running using Docker or Podman
+# 🐳 Building Images
 
-## Build
+Engine:
 
-```sh
-docker build -t data-product-hub .
+```bash
+podman build -t <registry>/data-product-hub-engine:<tag> -f Dockerfile.engine .
+podman push <registry>/data-product-hub-engine:<tag>
 ```
 
-Or in Podman:
+Operator:
 
-```sh
-podman build -t data-product-hub .
-```
-
-## Run
-
-```sh
-docker run -p 8000:8000 data-product-hub
-```
-
-(or)
-
-```sh
-podman run -p 8000:8000 data-product-hub
+```bash
+podman build -t <registry>/data-product-hub-operator:<tag> -f Dockerfile.operator .
+podman push <registry>/data-product-hub-operator:<tag>
 ```
 
 ---
 
-# ☸️ Deploy on Kubernetes (Helm)
+# ☸️ Helm Installation
 
-We include a Helm chart under:
+Update `values.yaml` with:
 
-```
-charts/data-product-hub/
-```
+* CRD group/name/version
+* Engine image
+* Operator image
+* PVC name for Parquet files
 
-## Install
+Then install:
 
-```sh
-helm install data-hub charts/data-product-hub -f charts/data-product-hub/values.yaml
-```
-
-## Includes:
-
-* Deployment
-* Service
-* ConfigMap for product configs
-* PersistentVolumeClaim (sample-data)
-* Ingress (path-based routing)
-
-You can place all YAML configs under:
-
-```
-charts/data-product-hub/config/data-products/
+```bash
+helm install data-product-hub ./charts/data-product-hub -n data-products
 ```
 
-and auto-load them via Helm.
+Upgrade:
+
+```bash
+helm upgrade data-product-hub ./charts/data-product-hub -n data-products
+```
 
 ---
 
-# 🔌 Configuration Directory Logic
-
-The engine loads configs from:
-
-1. `$CONFIG_DIR` (if provided)
+# 🧹 Deleting a Data Product
 
 ```
-export CONFIG_DIR=/app/config/data-products
+kubectl delete dp southafrica-scheduled-outage-dataset -n data-products
 ```
 
-2. Else default:
+Operator will:
 
-```
-data_product_hub/config/data-products
-```
-
-This allows:
-
-* Helm ConfigMap mounts
-* Docker COPY
-* Local development
-
-without conflicts.
+* Remove entry from shared metadata ConfigMap
+* Or delete dedicated engine resources
+* Delete Ingress
+* Trigger engine reload
 
 ---
 
-# 📚 Roadmap (coming soon)
+# 📚 Roadmap
 
 * `$filter` implementation
-* Service document (`/odata/`)
-* More OData-compliant metadata document
-* Optional pagination token strategy
-* Optional column type inference / schema enforcement
-
+* AuthZ via CRD (`spec.security`)
+* QoS policies (`spec.qos`)
+* Optional caching layer
+* Async streaming mode
+* Schema inference + validation

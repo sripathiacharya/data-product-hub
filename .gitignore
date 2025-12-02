@@ -207,3 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 .helm-tempalte.out
+values.local.yaml
