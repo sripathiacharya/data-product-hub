@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "data-product-hub.engine.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+    app.kubernetes.io/component: engine
+spec:
+  type: {{ .Values.engine.service.type }}
+  selector:
+    app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+    app.kubernetes.io/component: engine
+  ports:
+    - name: http
+      port: {{ .Values.engine.service.port }}
+      targetPort: {{ .Values.engine.service.targetPort }}

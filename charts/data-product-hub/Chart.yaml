@@ -1,22 +1,6 @@
 apiVersion: v2
 name: data-product-hub
-description: |
-  Config-driven data product hub exposing datasets via an OData-style
-  FastAPI service. Data products are defined using YAML and loaded at
-  runtime from ConfigMaps and volumes.
-
+description: Data Product Hub engine and operator
 type: application
-
-# Chart version (Helm chart itself)
 version: 0.1.0
-
-# App version (your container/app version)
 appVersion: "0.1.0"
-
-home: https://github.com/your-org/data-product-hub
-sources:
-  - https://github.com/your-org/data-product-hub
-
-maintainers:
-  - name: Your Name
-    email: you@example.com

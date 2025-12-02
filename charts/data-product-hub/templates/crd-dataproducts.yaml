@@ -1,0 +1,82 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: {{ printf "%s.%s" .Values.crd.plural .Values.crd.group }}
+spec:
+  group: {{ .Values.crd.group }}
+  names:
+    kind: {{ .Values.crd.kind }}
+    plural: {{ .Values.crd.plural }}
+    singular: {{ .Values.crd.singular }}
+    shortNames:
+      {{- range .Values.crd.shortNames }}
+      - {{ . }}
+      {{- end }}
+  scope: Namespaced
+  versions:
+    - name: {{ .Values.crd.version }}
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [api]
+              properties:
+                displayName:
+                  type: string
+                owner:
+                  type: string
+                description:
+                  type: string
+
+                api:
+                  type: object
+                  required: [path, version]
+                  properties:
+                    path:
+                      type: string
+                    version:
+                      type: string
+                    protocol:
+                      type: string
+                      default: odata
+                    resource:
+                      type: string
+
+                security:
+                  type: object
+                  properties:
+                    authPolicy:
+                      type: string
+                    allowedClients:
+                      type: array
+                      items:
+                        type: string
+
+                qos:
+                  type: object
+                  properties:
+                    tier:
+                      type: string
+
+                deploymentMode:
+                  type: string
+                  enum: [Shared, Dedicated]
+                  default: Shared
+
+                backend:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+
+                entity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+
+                odata:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}

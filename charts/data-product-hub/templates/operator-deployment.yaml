@@ -1,0 +1,76 @@
+{{- if .Values.operator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "data-product-hub.operator.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.operator.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+      app.kubernetes.io/component: operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      serviceAccountName: {{ include "data-product-hub.operator.fullname" . }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          env:
+            # CRD wiring
+            - name: DATA_PRODUCT_CRD_GROUP
+              value: {{ .Values.crd.group | quote }}
+            - name: DATA_PRODUCT_CRD_VERSION
+              value: {{ .Values.crd.version | quote }}
+            - name: DATA_PRODUCT_CRD_PLURAL
+              value: {{ .Values.crd.plural | quote }}
+
+            # --- Shared engine wiring (for deploymentMode: Shared) ---
+            - name: SHARED_ENGINE_SERVICE
+              value: {{ default (include "data-product-hub.engine.fullname" .) .Values.operator.config.sharedEngine.serviceName | quote }}
+            - name: SHARED_ENGINE_PORT
+              value: {{ .Values.operator.config.sharedEngine.servicePort | quote }}
+            - name: ENGINE_RELOAD_PATH
+              value: {{ .Values.operator.config.sharedEngine.reloadPath | quote }}
+            - name: SHARED_METADATA_CM_NAME
+              value: {{ .Values.operator.config.sharedEngine.metadataConfigMapName | quote }}
+
+            # --- Dedicated engine image (for deploymentMode: Dedicated) ---
+            - name: DEDICATED_ENGINE_IMAGE
+              value: {{ ternary (printf "%s:%s" .Values.engine.image.repository .Values.engine.image.tag) (printf "%s:%s" .Values.operator.config.dedicatedEngine.image.repository .Values.operator.config.dedicatedEngine.image.tag) .Values.operator.config.dedicatedEngine.inheritFromEngineImage | quote }}
+
+            # --- Ingress defaults for per-DataProduct ingress ---
+            - name: INGRESS_CLASS_NAME
+              value: {{ .Values.operator.config.ingress.className | quote }}
+            - name: INGRESS_BASE_HOST
+              value: {{ .Values.operator.config.ingress.baseHost | quote }}
+            - name: INGRESS_TLS_SECRET
+              value: {{ .Values.operator.config.ingress.tlsSecretName | quote }}
+            - name: INGRESS_PATH_PREFIX
+              value: {{ .Values.operator.config.ingress.pathPrefix | quote }}
+            - name: INGRESS_ANNOTATIONS_JSON
+              value: {{ .Values.operator.config.ingress.annotations | toJson | quote }}
+
+            # Namespace where the operator is running
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+            - name: IMAGE_PULL_SECRET
+              value: "ghcr-auth"
+          resources:
+            {{- toYaml .Values.resources.operator | nindent 12 }}
+{{- end }}

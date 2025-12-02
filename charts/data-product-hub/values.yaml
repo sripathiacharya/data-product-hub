@@ -1,149 +1,95 @@
-# Number of API replicas
-replicaCount: 1
+# Default values for data-product-hub.
 
-image:
-  repository: your-registry/data-product-hub
-  tag: "0.1.0"
-  pullPolicy: IfNotPresent
+namespaceOverride: ""
 
-# Image pull secrets (if using a private registry)
-imagePullSecrets: []
-  # - name: my-registry-secret
+imagePullSecrets:
+  - name: ghcr-auth
 
-# Pod-level annotations/labels if needed
-podAnnotations: {}
-podLabels: {}
+crd:
+  group: sripathiacharya.gitbub.io
+  kind: DataProduct
+  plural: dataproducts
+  singular: dataproduct
+  shortNames:
+    - dp
+  version: v1alpha1
 
-# Pod security context
-podSecurityContext: {}
-  # fsGroup: 1000
-
-# Container security context
-securityContext: {}
-  # runAsUser: 1000
-  # runAsNonRoot: true
-
-service:
-  type: ClusterIP
-  port: 80        # external service port
-  targetPort: 8000 # container port (where uvicorn listens)
-
-ingress:
+engine:
   enabled: true
+  image:
+    repository: ghcr.io/sripathiacharya/data-product-hub-engine
+    tag: "0.1.0"
+    pullPolicy: Always
 
-  # Optional: IngressClass, e.g. "nginx"
-  className: ""
+  replicaCount: 1
 
-  annotations: {}
-    # For nginx, you usually don't need rewrite when using path prefixes.
-    # nginx.ingress.kubernetes.io/rewrite-target: /
+  # Where Parquet & other data live inside the container
+  dataRoot: "/data-product-hub-data"
 
-  # Base path under which the API will be exposed.
-  # e.g. /data-product-hub → /data-product-hub/odata/...
-  basePath: /data-product-hub
+  dataVolume:
+    enabled: true
+    # assume you create this PVC separately
+    existingClaim: "data-product-hub-parquet-pvc"
 
-  # Optional hostname. Leave empty for "all hosts".
-  host: ""
-  # host: "data-product-hub.local"  # if you ever want host-based later
+  service:
+    type: ClusterIP
+    port: 8000        # Service port (external inside the cluster)
+    targetPort: 8000  # Container port
 
-  tls: []
-  # - secretName: data-product-hub-tls
-  #   hosts:
-  #     - data-product-hub.local
+operator:
+  enabled: true
+  image:
+    repository: ghcr.io/sripathiacharya/data-product-hub-operator
+    tag: "0.1.0"
+    pullPolicy: Always
 
+  replicaCount: 1
 
+  # Configuration passed to the operator via env vars.
+  config:
+    # --- Shared engine wiring (for deploymentMode: Shared) ---
+    sharedEngine:
+      # If empty, the chart will use the engine fullname (e.g. <release>-data-product-hub-engine).
+      serviceName: ""
+      servicePort: 8000
+      reloadPath: "/internal/reload-config"
+      metadataConfigMapName: "data-product-hub-metadata"
 
-resources: {}
-  # requests:
-  #   cpu: 100m
-  #   memory: 256Mi
-  # limits:
-  #   cpu: 500m
-  #   memory: 512Mi
+    # --- Dedicated engine defaults (for deploymentMode: Dedicated) ---
+    dedicatedEngine:
+      # If inheritFromEngineImage = true, operator uses engine.image.* for dedicated engines.
+      inheritFromEngineImage: true
+      image:
+        repository: ""   # only used if inheritFromEngineImage = false
+        tag: ""
+        pullPolicy: Always
 
-nodeSelector: {}
-tolerations: []
-affinity: {}
+      # Soft guardrail – you can enforce in operator logic later if you want.
+      maxCount: 100
 
-# ---------------------------------------------------------
-# Data product configuration
-# ---------------------------------------------------------
+    # --- Per-DataProduct ingress defaults (created by operator) ---
+    ingress:
+      createPerDataProduct: true
 
-# Directory inside the container where the product ConfigMap is mounted.
-# This must match the CONFIG_DIR env + volumeMount path in deployment.yaml.
-config:
-  mountPath: /app/config/data-products
+      # IngressClass to use (nginx, traefik, azure/application-gateway, etc.).
+      className: "nginx"
 
-# Extra product definitions that will be added as files in the ConfigMap.
-# Key = file stem, value = YAML file content.
-extraProducts: {}
-  # example-product: |
-  #   id: example-product
-  #   route: example-product
-  #   description: "Example product defined via Helm values."
-  #
-  #   backend:
-  #     engine: parquet_join
-  #     sources:
-  #       base:
-  #         path: sample-data/example.parquet
-  #
-  #   entity:
-  #     name: ExampleEntity
-  #     key_column: id
-  #     columns:
-  #       - name: id
-  #         type: string
-  #         generated: true
-  #       - name: value
-  #         type: string
-  #
-  #   odata:
-  #     filterable: [value]
-  #     orderable: [value]
+      # All DataProducts will be exposed on this host; path is derived from pathPrefix + spec.api.path.
+      baseHost: "dataproduct.example.com"
 
-# ---------------------------------------------------------
-# Data storage configuration
-# ---------------------------------------------------------
+      # TLS secret for this host (optional).
+      tlsSecretName: "dataproduct.example.com"
 
-data:
-  # If true, create and mount a PVC for /app/sample-data
-  enabled: false
+      # Prefix added in front of spec.api.path when creating ingress rules.
+      # e.g. /odata + /southafrica-scheduled-outage-dataset -> /odata/southafrica-scheduled-outage-dataset
+      pathPrefix: "/odata"
 
-  # Only used if data.enabled = true
-  pvc:
-    # name will default to "<release-name>-data" if empty, set explicitly if needed
-    name: ""
-    storageClassName: ""
-    accessModes:
-      - ReadWriteMany
-    size: 10Gi
+      # Operator will JSON-encode these and pass them in INGRESS_ANNOTATIONS_JSON.
+      annotations: {}
 
-  # If you don't use a PVC and rely on baked-in sample-data in the image,
-  # make sure the deployment still mounts /app/sample-data correctly if needed.
-  mountPath: /app/sample-data
+rbac:
+  create: true
 
-# ---------------------------------------------------------
-# Environment variables
-# ---------------------------------------------------------
-
-env:
-  # CONFIG_DIR tells the app where to look for data-product YAMLs.
-  # This should match config.mountPath above.
-  CONFIG_DIR: /app/config/data-products
-
-  # Additional env vars can be defined as a list of name/value pairs.
-  extra: []
-    # - name: LOG_LEVEL
-    #   value: debug
-
-products:
-  fromFiles:
-    - name: southafrica-scheduled-outage
-      file: config/data-products/southafrica-scheduled-outage.yaml
-
-    # later you can add more:
-    # - name: some-other-dataset
-    #   file: config/data-products/some-other-dataset.yaml
-
-  inline: {}  # keep this empty if you don’t want inline configs
+resources:
+  engine: {}
+  operator: {}

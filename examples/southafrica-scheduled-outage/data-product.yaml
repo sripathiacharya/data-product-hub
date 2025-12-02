@@ -1,0 +1,73 @@
+apiVersion: sripathiacharya.github.io/v1alpha1
+kind: DataProduct
+metadata:
+  name: southafrica-scheduled-outage-dataset
+  namespace: data-products
+spec:
+  displayName: "South Africa Scheduled Outage Dataset"
+  description: "Scheduled outage plan for South African suburbs..."
+  api:
+    path: /southafrica-scheduled-outage-dataset
+    version: v1
+    protocol: odata
+    resource: SouthAfricaScheduledOutage
+  backend:
+    engine: parquet_join
+    sources:
+      areas:
+        path: examples/southafrica-scheduled-outage/areas.parquet
+        rename:
+          province: province
+          city: city
+          suburb: suburb
+          provider: provider
+          block: block
+          type: area_type
+      schedule:
+        path: examples/southafrica-scheduled-outage/schedule.parquet
+        rename:
+          provider: provider
+          block: block
+          date: day
+          start: start_time
+          end: end_time
+          stage: stage
+    joins:
+      - left: areas
+        right: schedule
+        "on":
+          - provider
+          - block
+  entity:
+    name: SouthAfricaScheduledOutage
+    key_column: id
+    columns:
+      - name: id
+        type: string
+        generated: true
+      # ...rest of columns...
+  odata:
+    max_top: 1000
+    default_top: 100
+    filterable:
+      - province
+      - city
+      - suburb
+      - provider
+      - block
+      - area_type
+      - day
+      - stage
+      - start_time
+      - end_time
+    orderable:
+      - province
+      - city
+      - suburb
+      - provider
+      - block
+      - day
+      - stage
+      - start_time
+      - end_time
+  deploymentMode: Shared

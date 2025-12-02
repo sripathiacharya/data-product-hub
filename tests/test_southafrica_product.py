@@ -2,8 +2,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from data_product_hub.main import app
-from odata.registry import load_config_dir
+from engine.main import app
+from engine.odata.registry import load_config_dir
 
 
 def setup_module(module):

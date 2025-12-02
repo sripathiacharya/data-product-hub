@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install kopf + kubernetes client
+RUN pip install --no-cache-dir kopf kubernetes requests pyyaml
+
+# Copy operator source
+COPY src/operator ./operator
+
+# Ensure handlers are importable
+ENV PYTHONPATH=/app
+
+CMD ["kopf", "run", "--standalone", "/app/operator/main.py"]
