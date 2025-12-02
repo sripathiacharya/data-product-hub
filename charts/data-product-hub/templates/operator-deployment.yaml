@@ -63,6 +63,23 @@ spec:
             - name: INGRESS_ANNOTATIONS_JSON
               value: {{ .Values.operator.config.ingress.annotations | toJson | quote }}
 
+            # Where parquet data is mounted in engine containers
+            - name: DATA_ROOT_PATH
+              value: {{ .Values.engine.dataRoot | quote }}
+
+            # PVC used for parquet data (same as shared engine)
+            {{- if and .Values.engine.dataVolume.enabled .Values.engine.dataVolume.create }}
+            - name: DATA_PVC_NAME
+              value: {{ include "data-product-hub.engine.dataPvcName" . }}
+            {{- else if and .Values.engine.dataVolume.enabled (not .Values.engine.dataVolume.create) }}
+            - name: DATA_PVC_NAME
+              value: {{ .Values.engine.dataVolume.existingClaim | quote }}
+            {{- else }}
+            - name: DATA_PVC_NAME
+              value: ""
+            {{- end }}
+
+
             # Namespace where the operator is running
             - name: POD_NAMESPACE
               valueFrom:

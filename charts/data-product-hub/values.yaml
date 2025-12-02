@@ -27,9 +27,11 @@ engine:
   dataRoot: "/data-product-hub-data"
 
   dataVolume:
-    enabled: true
-    # assume you create this PVC separately
-    existingClaim: "data-product-hub-parquet-pvc"
+    enabled: true          # turn off completely if you don’t want any PVC
+    create: true           # true = chart creates a PVC; false = use existingClaim
+    existingClaim: ""      # set this when create=false
+    storageClassName: ""   # "" = use cluster default
+    size: 5Gi              # requested storage
 
   service:
     type: ClusterIP

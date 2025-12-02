@@ -1,0 +1,18 @@
+{{- if and .Values.engine.dataVolume.enabled .Values.engine.dataVolume.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "data-product-hub.engine.dataPvcName" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
+    app.kubernetes.io/component: engine
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.engine.dataVolume.storageClassName }}
+  storageClassName: {{ .Values.engine.dataVolume.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.engine.dataVolume.size | quote }}
+{{- end }}

@@ -32,8 +32,10 @@ spec:
           volumeMounts:
             - name: metadata
               mountPath: /etc/data-product-hub
+            {{- if .Values.engine.dataVolume.enabled }}
             - name: data-root
               mountPath: {{ .Values.engine.dataRoot | quote }}
+            {{- end }}
           # resources etc...
 
       volumes:
@@ -41,6 +43,12 @@ spec:
           configMap:
             name: data-product-hub-metadata
             optional: true
+        {{- if .Values.engine.dataVolume.enabled }}
         - name: data-root
           persistentVolumeClaim:
-            claimName: {{ .Values.engine.dataVolume.existingClaim }}
+            {{- if .Values.engine.dataVolume.create }}
+            claimName: {{ include "data-product-hub.engine.dataPvcName" . }}
+            {{- else -}}
+            claimName: {{ .Values.engine.dataVolume.existingClaim | quote }}
+            {{- end }}
+        {{- end }}

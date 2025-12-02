@@ -25,6 +25,8 @@ INGRESS_ANNOTATIONS_JSON = os.getenv("INGRESS_ANNOTATIONS_JSON", "{}")
 
 SHARED_METADATA_CM_NAME = os.getenv("SHARED_METADATA_CM_NAME", "data-product-hub-metadata")
 
+DATA_ROOT_PATH = os.getenv("DATA_ROOT_PATH", "/data-product-hub-data")
+DATA_PVC_NAME = os.getenv("DATA_PVC_NAME", "")
 
 def _load_k8s_config():
     # In-cluster config if running in k8s; local config if running kopf locally
@@ -288,36 +290,63 @@ def _ensure_dedicated_engine(namespace: str, name: str, cm_name: str) -> str:
         "data-product-hub/dataproduct": name,
     }
 
-    # NOTE: image should match engine image; we expect it via env IMAGE_ENGINE or similar.
+    # NOTE: image should match engine image; we expect it via env IMAGE_ENGINE / DEDICATED_ENGINE_IMAGE.
     engine_image = os.getenv("DEDICATED_ENGINE_IMAGE", os.getenv("ENGINE_IMAGE", "your-reg/engine:latest"))
+
+    # -------- env vars --------
+    env_vars = [
+        client.V1EnvVar(name="DP_METADATA_PATH", value="/etc/data-product-hub/dataproducts.json"),
+        # IMPORTANT: same data root as shared engine, comes from DATA_ROOT_PATH
+        client.V1EnvVar(name="DP_REPO_ROOT", value=DATA_ROOT_PATH),
+    ]
+
+    # -------- volume mounts --------
+    volume_mounts = [
+        client.V1VolumeMount(name="metadata", mount_path="/etc/data-product-hub", read_only=True),
+    ]
+
+    # If a PVC is configured, mount it at DATA_ROOT_PATH
+    volumes = [
+        client.V1Volume(
+            name="metadata",
+            config_map=client.V1ConfigMapVolumeSource(
+                name=cm_name,
+                items=[client.V1KeyToPath(key="dataproducts.json", path="dataproducts.json")],
+            ),
+        )
+    ]
+
+    if DATA_PVC_NAME:
+        volume_mounts.append(
+            client.V1VolumeMount(
+                name="data-root",
+                mount_path=DATA_ROOT_PATH,
+                read_only=False,  # parquet reads only, but RW is fine
+            )
+        )
+        volumes.append(
+            client.V1Volume(
+                name="data-root",
+                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=DATA_PVC_NAME
+                ),
+            )
+        )
 
     container = client.V1Container(
         name="engine",
         image=engine_image,
         image_pull_policy="IfNotPresent",
-        env=[
-            client.V1EnvVar(name="DP_METADATA_PATH", value="/etc/data-product-hub/dataproducts.json"),
-            client.V1EnvVar(name="DP_REPO_ROOT", value="/app"),
-        ],
+        env=env_vars,
         ports=[client.V1ContainerPort(container_port=8000, name="http")],
-        volume_mounts=[
-            client.V1VolumeMount(name="metadata", mount_path="/etc/data-product-hub", read_only=True),
-        ],
+        volume_mounts=volume_mounts,
     )
 
     image_pull_secret = os.getenv("IMAGE_PULL_SECRET")
 
     pod_spec = client.V1PodSpec(
         containers=[container],
-        volumes=[
-            client.V1Volume(
-                name="metadata",
-                config_map=client.V1ConfigMapVolumeSource(
-                    name=cm_name,
-                    items=[client.V1KeyToPath(key="dataproducts.json", path="dataproducts.json")],
-                ),
-            )
-        ],
+        volumes=volumes,
         image_pull_secrets=[
             client.V1LocalObjectReference(name=image_pull_secret)
         ] if image_pull_secret else None,
@@ -367,6 +396,7 @@ def _ensure_dedicated_engine(namespace: str, name: str, cm_name: str) -> str:
             raise
 
     return svc_name
+
 
 
 def _delete_dedicated_resources(namespace: str, name: str) -> None:

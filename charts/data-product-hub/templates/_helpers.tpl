@@ -22,3 +22,7 @@
 {{- define "data-product-hub.operator.fullname" -}}
 {{ include "data-product-hub.fullname" . }}-operator
 {{- end }}
+
+{{- define "data-product-hub.engine.dataPvcName" -}}
+{{ include "data-product-hub.fullname" . }}-engine-data
+{{- end -}}
