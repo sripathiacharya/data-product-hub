@@ -1,5 +1,72 @@
 from typing import Optional
+import re
+
 import pandas as pd
+
+
+def _translate_odata_filter(filter_expr: str) -> str:
+    """
+    Translate a subset of OData $filter syntax into a pandas.query expression.
+
+    Supported:
+      - Comparison: eq, ne, gt, ge, lt, le
+      - Logical: and, or
+      - Literals: true/false/null
+      - Parentheses are passed through as-is.
+
+    Example:
+      "province eq 'Gauteng' and stage ge 3"
+      --> "province == 'Gauteng' & stage >= 3"
+    """
+    expr = filter_expr
+
+    # Map OData keywords to pandas/query / Python equivalents using word-boundary regexes
+    replacements = {
+        r"\beq\b": "==",
+        r"\bne\b": "!=",
+        r"\bgt\b": ">",
+        r"\bge\b": ">=",
+        r"\blt\b": "<",
+        r"\ble\b": "<=",
+        r"\band\b": "&",
+        r"\bor\b": "|",
+        r"\btrue\b": "True",
+        r"\bfalse\b": "False",
+        r"\bnull\b": "None",
+    }
+
+    for pattern, repl in replacements.items():
+        expr = re.sub(pattern, f" {repl} ", expr, flags=re.IGNORECASE)
+
+    # Normalize whitespace a bit
+    expr = re.sub(r"\s+", " ", expr).strip()
+    return expr
+
+
+def _apply_filter(df: pd.DataFrame, filter_expr: Optional[str], entity=None) -> pd.DataFrame:
+    """
+    Apply OData-like $filter to a DataFrame.
+
+    For now we:
+      - trust the filter expression (internal API),
+      - translate OData operators,
+      - evaluate with df.query(engine="python").
+
+    If evaluation fails for any reason, we fall back to returning the original df.
+    """
+    if not filter_expr:
+        return df
+
+    translated = _translate_odata_filter(filter_expr)
+
+    # TODO (hardening): validate column names against df.columns and/or
+    # the entity/odata.filterable config to avoid untrusted expressions.
+    try:
+        return df.query(translated, engine="python")
+    except Exception:
+        # Graceful degradation: ignore invalid filters instead of 500.
+        # If you prefer strictness, raise an error and map to HTTP 400.
+        return df
 
 
 def apply_odata_query(
@@ -9,19 +76,28 @@ def apply_odata_query(
     top: Optional[int] = None,
     skip: Optional[int] = None,
     orderby: Optional[str] = None,
-    entity=None,  # kept for future extension; currently unused
+    entity=None,  # reserved for future use (e.g. validation against entity metadata)
 ) -> pd.DataFrame:
     """
     Minimal OData-like query support:
 
-      - $select: comma-separated list of columns
-      - $top: limit rows
-      - $skip: offset rows
+      - $filter: basic expressions with eq/ne/gt/ge/lt/le, and/or, parentheses.
       - $orderby: single column, `col` or `col desc`
+      - $skip: offset rows
+      - $top: limit rows
+      - $select: comma-separated list of columns
 
-    NOTE:
-      - $filter is currently a no-op (ignored); we can add parsing later.
+    The order of operations is:
+      1. filter
+      2. orderby
+      3. skip
+      4. top
+      5. select
     """
+
+    # ---- $filter ----
+    if filter_expr:
+        df = _apply_filter(df, filter_expr, entity)
 
     # ---- $orderby ----
     if orderby:
@@ -49,8 +125,5 @@ def apply_odata_query(
         existing = [c for c in cols if c in df.columns]
         if existing:
             df = df[existing]
-
-    # ---- $filter (not yet implemented) ----
-    _ = filter_expr  # currently unused; placeholder
 
     return df

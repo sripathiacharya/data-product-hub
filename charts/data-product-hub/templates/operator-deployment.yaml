@@ -46,6 +46,9 @@ spec:
               value: {{ .Values.operator.config.sharedEngine.reloadPath | quote }}
             - name: SHARED_METADATA_CM_NAME
               value: {{ .Values.operator.config.sharedEngine.metadataConfigMapName | quote }}
+            - name: SHARED_ENGINE_DEPLOYMENT
+              value: {{ include "data-product-hub.engine.fullname" . }}
+
 
             # --- Dedicated engine image (for deploymentMode: Dedicated) ---
             - name: DEDICATED_ENGINE_IMAGE

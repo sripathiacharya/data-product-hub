@@ -1,5 +1,5 @@
 # src/operator/handlers/dataproduct.py
-
+import datetime
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -16,6 +16,7 @@ PLURAL = os.getenv("DATA_PRODUCT_CRD_PLURAL", "dataproducts")
 SHARED_ENGINE_SERVICE = os.getenv("SHARED_ENGINE_SERVICE", "data-product-hub-engine")
 SHARED_ENGINE_PORT = int(os.getenv("SHARED_ENGINE_PORT", "8000"))
 ENGINE_RELOAD_PATH = os.getenv("ENGINE_RELOAD_PATH", "/internal/reload-config")
+SHARED_ENGINE_DEPLOYMENT = os.getenv("SHARED_ENGINE_DEPLOYMENT", "data-product-hub-data-product-hub-engine")
 
 INGRESS_CLASS_NAME = os.getenv("INGRESS_CLASS_NAME", "nginx")
 INGRESS_BASE_HOST = os.getenv("INGRESS_BASE_HOST", "data-products.dev.yourco.com")
@@ -78,6 +79,48 @@ def _dataproduct_to_metadata(spec: Dict[str, Any], name: str, namespace: str) ->
 # SHARED MODE HELPERS
 # --------------------------------------------------------------------
 
+def _bump_shared_engine_revision(namespace: str, logger) -> None:
+    """
+    Force a restart of the shared engine by bumping a pod template annotation
+    on its Deployment. This avoids races with projected ConfigMap volumes.
+    """
+    if not SHARED_ENGINE_DEPLOYMENT:
+        logger.warning("SHARED_ENGINE_DEPLOYMENT not set; cannot bump engine revision.")
+        return
+
+    _load_k8s_config()
+    apps = client.AppsV1Api()
+
+    # Use a simple timestamp; anything that changes the value will trigger a rollout.
+    revision = datetime.datetime.utcnow().isoformat()
+
+    body = {
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "data-product-hub/metadata-revision": revision,
+                    }
+                }
+            }
+        }
+    }
+
+    try:
+        logger.info(
+            f"Bumping shared engine deployment {SHARED_ENGINE_DEPLOYMENT} "
+            f"annotation data-product-hub/metadata-revision={revision}"
+        )
+        apps.patch_namespaced_deployment(
+            name=SHARED_ENGINE_DEPLOYMENT,
+            namespace=namespace,
+            body=body,
+        )
+    except client.exceptions.ApiException as e:
+        logger.error(
+            f"Failed to patch shared engine deployment {SHARED_ENGINE_DEPLOYMENT}: {e}"
+        )
+        # Don't raise; we don't want to fail the reconcile just because restart failed.
 
 def _update_shared_metadata(namespace: str, name: str, spec: Dict[str, Any]) -> None:
     """
@@ -438,7 +481,7 @@ def dataproduct_create_or_update(spec, name, namespace, logger, **kwargs):
     if mode == "Shared":
         # Ensure shared metadata & reload shared engine
         _update_shared_metadata(namespace, name, spec)
-        _notify_engine_reload(namespace, SHARED_ENGINE_SERVICE, SHARED_ENGINE_PORT)
+        _bump_shared_engine_revision(namespace, logger)
 
         # Shared engine ingress
         _ensure_ingress_for_dp(
@@ -484,7 +527,7 @@ def dataproduct_delete(spec, name, namespace, logger, **kwargs):
 
     if mode == "Shared":
         _remove_from_shared_metadata(namespace, name)
-        _notify_engine_reload(namespace, SHARED_ENGINE_SERVICE, SHARED_ENGINE_PORT)
+        _bump_shared_engine_revision(namespace, logger)
     elif mode == "Dedicated":
         _delete_dedicated_resources(namespace, name)
 

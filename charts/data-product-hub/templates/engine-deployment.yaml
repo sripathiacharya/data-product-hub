@@ -16,6 +16,8 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "data-product-hub.name" . }}
         app.kubernetes.io/component: engine
+      annotations:
+        data-product-hub/metadata-revision: "1.0"
     spec:
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}

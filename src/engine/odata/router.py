@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from urllib.parse import urlencode
 
 from .registry import list_products, get_runtime
+from .filter import apply_odata_query
 
 
 # ------------------------------------------------------------------
@@ -152,8 +153,9 @@ def query_product(
     """
     Query the main (joined) dataset for a product.
 
-    Example:
+    Examples:
       /odata/southafrica-scheduled-outage-dataset?$top=10
+      /odata/southafrica-scheduled-outage-dataset?$filter=province eq 'Gauteng' and stage ge 3
     """
     runtime = get_runtime(product_route)
     if runtime is None:
@@ -161,14 +163,22 @@ def query_product(
 
     df = runtime.df
 
-    # Total count BEFORE pagination (since we don't implement $filter yet,
-    # this is simply the total number of rows)
-    total_count = len(df)
+    # --- total count AFTER filter, BEFORE paging ---
+    df_filtered_for_count = apply_odata_query(
+        df=df,
+        select=None,
+        filter_expr=filter_,
+        top=None,
+        skip=None,
+        orderby=None,
+        entity=runtime.config.entity,
+    )
+    total_count = len(df_filtered_for_count)
 
     # Apply default_top / max_top policy
     eff_top = _effective_top(top, runtime)
 
-    # Apply query
+    # --- page data (filter + orderby + skip + top + select) ---
     df_page = apply_odata_query(
         df=df,
         select=select,
@@ -181,7 +191,7 @@ def query_product(
 
     records = df_page.to_dict(orient="records")
 
-    # Build @odata.nextLink if there is another page
+    # Build @odata.nextLink if there is another page AFTER filtering
     next_link = None
     if eff_top is not None:
         current_skip = skip or 0
@@ -224,7 +234,7 @@ def query_product_source(
 
     Examples:
       /odata/southafrica-scheduled-outage-dataset/areas?$top=5
-      /odata/southafrica-scheduled-outage-dataset/schedule?$top=5
+      /odata/southafrica-scheduled-outage-dataset/areas?$filter=province eq 'Western Cape'
     """
     runtime = get_runtime(product_route)
     if runtime is None:
@@ -238,13 +248,22 @@ def query_product_source(
 
     df = runtime.raw[source_name]
 
-    # Total count BEFORE pagination
-    total_count = len(df)
+    # --- total count AFTER filter, BEFORE paging ---
+    df_filtered_for_count = apply_odata_query(
+        df=df,
+        select=None,
+        filter_expr=filter_,
+        top=None,
+        skip=None,
+        orderby=None,
+        entity=None,  # no per-source metadata yet
+    )
+    total_count = len(df_filtered_for_count)
 
     # Apply default_top / max_top policy (same as joined)
     eff_top = _effective_top(top, runtime)
 
-    # Apply query
+    # --- page data ---
     df_page = apply_odata_query(
         df=df,
         select=select,
@@ -252,12 +271,12 @@ def query_product_source(
         top=eff_top,
         skip=skip,
         orderby=orderby,
-        entity=None,  # no per-source metadata yet
+        entity=None,
     )
 
     records = df_page.to_dict(orient="records")
 
-    # Build @odata.nextLink if there is another page
+    # Build @odata.nextLink if there is another page AFTER filtering
     next_link = None
     if eff_top is not None:
         current_skip = skip or 0
