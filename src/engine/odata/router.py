@@ -3,64 +3,12 @@ from typing import Optional
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 from urllib.parse import urlencode
+import logging
 
 from .registry import list_products, get_runtime
 from .filter import apply_odata_query
 
-
-# ------------------------------------------------------------------
-# Minimal OData-like query support (local helper)
-# ------------------------------------------------------------------
-def apply_odata_query(
-    df: pd.DataFrame,
-    select: Optional[str] = None,
-    filter_expr: Optional[str] = None,
-    top: Optional[int] = None,
-    skip: Optional[int] = None,
-    orderby: Optional[str] = None,
-    entity=None,  # kept for future extension; currently unused
-) -> pd.DataFrame:
-    """
-    Minimal OData-like query support:
-
-      - $select: comma-separated list of columns
-      - $top: limit rows
-      - $skip: offset rows
-      - $orderby: single column, `col` or `col desc`
-
-    NOTE:
-      - $filter is currently a no-op (ignored); we can add parsing later.
-    """
-
-    # ---- $orderby ----
-    if orderby:
-        parts = [p.strip() for p in orderby.split()]
-        col = parts[0]
-        ascending = True
-        if len(parts) > 1 and parts[1].lower() == "desc":
-            ascending = False
-
-        if col in df.columns:
-            df = df.sort_values(by=col, ascending=ascending)
-
-    # ---- $skip ----
-    if skip:
-        df = df.iloc[skip:]
-
-    # ---- $top ----
-    if top:
-        df = df.iloc[:top]
-
-    # ---- $select ----
-    if select:
-        cols = [c.strip() for c in select.split(",") if c.strip()]
-        existing = [c for c in cols if c in df.columns]
-        if existing:
-            df = df[existing]
-
-    _ = filter_expr  # placeholder for future $filter implementation
-
-    return df
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------
@@ -152,16 +100,22 @@ def query_product(
 ):
     """
     Query the main (joined) dataset for a product.
-
-    Examples:
-      /odata/southafrica-scheduled-outage-dataset?$top=10
-      /odata/southafrica-scheduled-outage-dataset?$filter=province eq 'Gauteng' and stage ge 3
     """
     runtime = get_runtime(product_route)
     if runtime is None:
         raise HTTPException(status_code=404, detail=f"Unknown data product '{product_route}'")
 
     df = runtime.df
+
+    logger.info(
+        "Query product=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r",
+        product_route,
+        filter_,
+        select,
+        top,
+        skip,
+        orderby,
+    )
 
     # --- total count AFTER filter, BEFORE paging ---
     df_filtered_for_count = apply_odata_query(
@@ -174,6 +128,8 @@ def query_product(
         entity=runtime.config.entity,
     )
     total_count = len(df_filtered_for_count)
+    logger.info("Filtered total_count=%s for product=%s", total_count, product_route)
+    print(f"Filtered total_count={total_count} for product={product_route}")
 
     # Apply default_top / max_top policy
     eff_top = _effective_top(top, runtime)
@@ -231,10 +187,6 @@ def query_product_source(
 ):
     """
     Query a raw backend source (e.g. 'areas', 'schedule') independently.
-
-    Examples:
-      /odata/southafrica-scheduled-outage-dataset/areas?$top=5
-      /odata/southafrica-scheduled-outage-dataset/areas?$filter=province eq 'Western Cape'
     """
     runtime = get_runtime(product_route)
     if runtime is None:
@@ -248,6 +200,17 @@ def query_product_source(
 
     df = runtime.raw[source_name]
 
+    logger.info(
+        "Query source product=%s source=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r",
+        product_route,
+        source_name,
+        filter_,
+        select,
+        top,
+        skip,
+        orderby,
+    )
+
     # --- total count AFTER filter, BEFORE paging ---
     df_filtered_for_count = apply_odata_query(
         df=df,
@@ -256,14 +219,18 @@ def query_product_source(
         top=None,
         skip=None,
         orderby=None,
-        entity=None,  # no per-source metadata yet
+        entity=None,
     )
     total_count = len(df_filtered_for_count)
+    logger.info(
+        "Filtered total_count=%s for product=%s source=%s",
+        total_count,
+        product_route,
+        source_name,
+    )
 
-    # Apply default_top / max_top policy (same as joined)
     eff_top = _effective_top(top, runtime)
 
-    # --- page data ---
     df_page = apply_odata_query(
         df=df,
         select=select,
@@ -276,7 +243,6 @@ def query_product_source(
 
     records = df_page.to_dict(orient="records")
 
-    # Build @odata.nextLink if there is another page AFTER filtering
     next_link = None
     if eff_top is not None:
         current_skip = skip or 0

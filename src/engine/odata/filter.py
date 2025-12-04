@@ -1,7 +1,12 @@
+# src/engine/odata/filter.py
+
 from typing import Optional
 import re
+import logging
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def _translate_odata_filter(filter_expr: str) -> str:
@@ -52,20 +57,28 @@ def _apply_filter(df: pd.DataFrame, filter_expr: Optional[str], entity=None) -> 
       - translate OData operators,
       - evaluate with df.query(engine="python").
 
-    If evaluation fails for any reason, we fall back to returning the original df.
+    If evaluation fails for any reason, we fall back to returning the original df
+    but log the error so you can debug.
     """
     if not filter_expr:
         return df
 
+    logger.info("Applying $filter: %s", filter_expr)
     translated = _translate_odata_filter(filter_expr)
+    logger.info("Translated $filter for pandas.query: %s", translated)
 
-    # TODO (hardening): validate column names against df.columns and/or
-    # the entity/odata.filterable config to avoid untrusted expressions.
+    # TODO (hardening): validate column names against df.columns or entity config.
     try:
         return df.query(translated, engine="python")
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Failed to apply $filter. original=%r translated=%r error=%r",
+            filter_expr,
+            translated,
+            e,
+        )
         # Graceful degradation: ignore invalid filters instead of 500.
-        # If you prefer strictness, raise an error and map to HTTP 400.
+        # If you prefer strictness, raise and map to HTTP 400.
         return df
 
 
@@ -101,7 +114,6 @@ def apply_odata_query(
 
     # ---- $orderby ----
     if orderby:
-        # support forms: "col" or "col desc"
         parts = [p.strip() for p in orderby.split()]
         col = parts[0]
         ascending = True
@@ -109,20 +121,26 @@ def apply_odata_query(
             ascending = False
 
         if col in df.columns:
+            logger.info("Applying $orderby on column=%s ascending=%s", col, ascending)
             df = df.sort_values(by=col, ascending=ascending)
+        else:
+            logger.warning("Ignoring $orderby: column %r not in df.columns", col)
 
     # ---- $skip ----
     if skip:
+        logger.info("Applying $skip=%s", skip)
         df = df.iloc[skip:]
 
     # ---- $top ----
     if top:
+        logger.info("Applying $top=%s", top)
         df = df.iloc[:top]
 
     # ---- $select ----
     if select:
         cols = [c.strip() for c in select.split(",") if c.strip()]
         existing = [c for c in cols if c in df.columns]
+        logger.info("Applying $select=%s -> existing columns=%s", cols, existing)
         if existing:
             df = df[existing]
 
