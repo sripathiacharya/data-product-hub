@@ -1,94 +1,121 @@
-# 📦 Data Product Hub — Operator-Driven OData Engine
+# 📦 **Data Product Hub — Kubernetes-Native OData Engine**
 
-Data Product Hub is a lightweight, Kubernetes-native engine for publishing data products using **OData-style REST APIs**.
-It is designed for **cloud platforms**, **data spaces**, and **internal developer portals**.
+Data Product Hub is a declarative, operator-driven way to publish datasets as **OData-style REST APIs** in Kubernetes.
+Each dataset is defined as a **DataProduct CR**, and the platform takes care of:
 
-## ✨ Key Features
+* backend configuration
+* join logic
+* routing
+* API exposure
+* authentication (JWT + claim mapping)
+* shared or dedicated runtime engine
 
-### **Kubernetes-first design**
+It is designed for **data spaces**, **integration platforms**, and **enterprise data-sharing ecosystems**.
 
-* Data Products are defined declaratively using a **Custom Resource Definition (CRD)**.
-* A **Kopf-based Operator** reconciles DataProducts into actual runtime resources:
+---
 
-  * Shared or dedicated engine deployments
-  * Per-product Ingress routes
-  * `ConfigMap` metadata for the engine
-  * (future) security, QoS, tenancy, etc.
+# ✨ **Key Features**
 
-### **OData-style API**
+### **🔹 Kubernetes-first**
 
-Each dataset is automatically exposed as:
+* Data Products defined via CRD
+* Kopf-based Operator reconciles CRs into infrastructure:
 
-```
-/odata/<data-product-id>
-```
+  * Shared/dedicated engine deployments
+  * ConfigMaps containing metadata
+  * Ingress routing
+  * Reload signaling for the engine
+
+### **🔹 OData-style REST API**
 
 Supports:
 
 * `$top`, `$skip`, `$orderby`
 * `$select`
-* Pagination + count
-* Multiple backend sources
-* Join logic
-* Auto-generated IDs
+* `$filter` (now supports AND, OR, equality, numeric comparisons)
+* Pagination and `@odata.count`
 
-### **Pluggable backend engine**
+### **🔹 Pluggable Backends**
 
-* Current backend: **Parquet + DuckDB**
-* Local or PVC-mounted data
-* Per-product joins and rename mappings
+Current:
 
-### **Flexible deployment modes**
+* **Parquet + DuckDB** (local or PVC)
 
-* **Shared engine** → Many data products served by one API engine
-* **Dedicated engine** → One engine per data product (strong isolation)
+Future:
+
+* Delta Lake
+* Database connectors
+* Pandas / Arrow adapters
+
+### **🔹 Flexible Deployment Modes**
+
+| Mode                 | Description                                                                |
+| -------------------- | -------------------------------------------------------------------------- |
+| **Shared engine**    | All datasets served by one engine instance                                 |
+| **Dedicated engine** | Full isolation per dataset (its own engine Deployment + Service + Ingress) |
+
+Selection is done in the CR:
+
+```yaml
+deploymentMode: Shared   # or Dedicated
+```
+
+### **🔹 Built-in Authentication**
+
+* Optional JWT validation
+* Configurable JWKS, issuer, algorithms
+* Claim mapping for application identity
+* Pluggable entitlements backend:
+
+  * Static config (current)
+  * Vault (future)
+  * External entitlement API (future)
 
 ---
 
-# 🏗️ Architecture
+# 🏗️ **Architecture Overview**
 
 ```
-       +-----------------------------+
-       |     DataProduct (CRD)       |
-       |  apiVersion: <group>/<ver>  |
-       |  kind: DataProduct          |
-       +--------------+--------------+
-                      |  Reconcile
-                      v
-              +------------------+
-              |     Operator     |
-              +------------------+
-               | configmap update       ┌─────────────┐
-               | engine reload           │ PVC-mounted │
-               | ingress creation        │   Parquet   │
-               v                         └─────────────┘
-       +-----------------------------------------------+
-       |                Shared Engine                  |
-       |  loads dataproducts.json → registry          |
-       |  GET /odata/<dp> → OData endpoint            |
-       +-----------------------------------------------+
+            +-------------------------------+
+            |     DataProduct (CRD)         |
+            |  apiVersion: <group>/<ver>    |
+            +---------------+---------------+
+                            |  Reconciliation
+                            v
+                   +-------------------+
+                   |     Operator      |
+                   +-------------------+
+       Shared Mode  |         | Dedicated Mode
+                    v         v
+     +------------------+   +--------------------------+
+     | Shared Engine    |   | Dedicated Engine        |
+     | One instance     |   | One per DataProduct     |
+     +------------------+   +--------------------------+
+           ^     ^             ^
+           |     |             |
+   ConfigMap   Reload       PVC mount
 ```
 
 ---
 
-# 📁 Repository Layout (New)
+# 📁 Repository Structure
 
 ```
 data-product-hub/
 │
 ├── src/
-│   ├── engine/           # OData engine
-│   └── operator/         # CRD reconciler
+│   ├── engine/                   # OData engine runtime
+│   └── operator/                 # Kopf operator and CRD handlers
 │
 ├── charts/
 │   └── data-product-hub/
-│       ├── templates/    # CRD, operator, engine, ingress
-│       └── values.yaml   # CRD group/name, PVC, images
+│       ├── templates/            # CRD, operator, engine, PVC, Ingress
+│       ├── values.yaml           # CRD group/name, images, auth, PVC
 │
 ├── examples/
 │   └── southafrica-scheduled-outage/
-│       ├── data-product.yaml   # example CR
-│       ├── sample-data/        # parquet
+│       ├── data-product.yaml
+│       ├── sample-data/*.parquet
 │
 ├── Dockerfile.engine
 ├── Dockerfile.operator
@@ -97,7 +124,7 @@ data-product-hub/
 
 ---
 
-# 📝 Defining a Data Product (CRD)
+# 📝 **Defining a Data Product**
 
 Example: `data-product.yaml`
 
@@ -109,7 +136,7 @@ metadata:
 
 spec:
   description: "Scheduled outage plan with joined metadata"
-  deploymentMode: Shared   # or Dedicated
+  deploymentMode: Shared     # or Dedicated
 
   api:
     path: /southafrica-scheduled-outage-dataset
@@ -119,14 +146,13 @@ spec:
 
   backend:
     engine: parquet_join
-
     sources:
       areas:
         path: examples/southafrica-scheduled-outage/sample-data/areas.parquet
         rename:
-          suburb: suburb
-          city: city
           province: province
+          city: city
+          suburb: suburb
           provider: provider
           block: block
 
@@ -176,141 +202,165 @@ kubectl apply -f data-product.yaml -n data-products
 
 # ⚙️ What the Operator Does
 
-### **Shared mode**
+### 🔹 Shared Mode
 
-1. Reads CR
-2. Updates the metadata ConfigMap (`data-product-hub-metadata`)
-3. Calls engine reload: `/internal/reload-config`
-4. Creates Ingress:
+* Updates shared ConfigMap (`data-product-hub-metadata`)
+* Triggers engine reload via `/internal/reload-config`
+* Creates ingress route `/odata/<path>`
 
-```
-/odata/southafrica-scheduled-outage-dataset
-```
+### 🔹 Dedicated Mode
 
-### **Dedicated mode**
+Operator automatically:
 
-1. Generates a Deployment + Service just for this product
-2. Creates dedicated metadata ConfigMap
-3. Creates dedicated Ingress
-4. Deletes all these automatically on `kubectl delete dp <name>`
+* Creates:
+
+  * Deployment (engine)
+  * Service
+  * ConfigMap (just for one DP)
+  * Ingress
+* Mounts the shared PVC for parquet files
+* Deletes all resources on `kubectl delete dp`
 
 ---
 
-# 🚀 Running Locally (Operator-Free)
+# 🔒 Authentication (JWT)
 
-You can simulate a DataProduct without Kubernetes.
+Enable in `values.yaml`:
 
-### Option A — Load a CR directly
+```yaml
+auth:
+  enabled: true
+  jwksUrl: "https://.../jwks-keys"
+  issuer: "https://..."
+  algorithms: ["RS256"]
+```
+
+Engine enforces:
+
+1. JWT signature validity
+2. Issuer, audience (optional)
+3. Extract application identity (e.g., `client_id`)
+4. Check entitlement backend (pluggable)
+
+---
+
+# 🧩 Entitlements (Authorization)
+
+### Current:
+
+* Static configuration (allow/deny by dataset)
+* Optional: dataset may specify:
+
+```yaml
+security:
+  allowedClients:
+    - app-123
+    - app-777
+```
+
+### Future:
+
+* HashiCorp Vault KV
+* Internal org entitlement service
+* Remote PDP (OPA / Cedar)
+
+---
+
+# 🔌 Query API Examples
+
+```
+GET /odata/southafrica-scheduled-outage-dataset?$top=5
+GET /odata/southafrica-scheduled-outage-dataset?$filter=province eq 'Gauteng' and stage gt 2
+GET /odata/southafrica-scheduled-outage-dataset?$orderby=day desc
+```
+
+---
+
+# 🧪 Local Development (No Operator Needed)
+
+Load a CR directly:
 
 ```bash
 export DP_LOCAL_CR=examples/southafrica-scheduled-outage/data-product.yaml
-uvicorn engine.main:app --app-dir src --reload
+uvicorn engine.main:app --reload --app-dir src
 ```
 
-Engine logs:
-
-```
-[local] Loaded DataProduct CR from examples/... (route=southafrica-scheduled-outage-dataset)
-```
-
-### Option B — Load a metadata JSON file
+Or load via metadata JSON:
 
 ```bash
-export DP_METADATA_PATH=./local-dataproducts.json
-uvicorn engine.main:app --app-dir src --reload
+export DP_METADATA_PATH=local-metadata.json
 ```
 
 ---
 
-# 🔌 Querying Data Products
-
-### Base:
-
-```
-GET /odata/<product>
-```
-
-### Examples:
-
-```
-GET /odata/southafrica-scheduled-outage-dataset?$top=10
-GET /odata/southafrica-scheduled-outage-dataset?$orderby=day desc
-GET /odata/southafrica-scheduled-outage-dataset?$select=suburb,stage
-```
-
-Pagination:
-
-```
-{
-  "@odata.count": 42333,
-  "value": [ ... ],
-  "@odata.nextLink": "/odata/...?$skip=100&$top=100"
-}
-```
-
----
-
-# 🐳 Building Images
+# 🐳 Building Docker Images
 
 Engine:
 
 ```bash
-podman build -t <registry>/data-product-hub-engine:<tag> -f Dockerfile.engine .
-podman push <registry>/data-product-hub-engine:<tag>
+podman build -f Dockerfile.engine -t <registry>/data-product-hub-engine:latest .
 ```
 
 Operator:
 
 ```bash
-podman build -t <registry>/data-product-hub-operator:<tag> -f Dockerfile.operator .
-podman push <registry>/data-product-hub-operator:<tag>
+podman build -f Dockerfile.operator -t <registry>/data-product-hub-operator:latest .
+```
+
+Push:
+
+```bash
+podman push <registry>/data-product-hub-engine:latest
 ```
 
 ---
 
 # ☸️ Helm Installation
 
-Update `values.yaml` with:
-
-* CRD group/name/version
-* Engine image
-* Operator image
-* PVC name for Parquet files
-
-Then install:
-
 ```bash
 helm install data-product-hub ./charts/data-product-hub -n data-products
 ```
 
-Upgrade:
+Values supports:
 
-```bash
-helm upgrade data-product-hub ./charts/data-product-hub -n data-products
-```
+* CRD group/name
+* JWT configuration
+* Shared PVC
+* Custom storageClass
+* Image pull secrets
 
 ---
 
 # 🧹 Deleting a Data Product
 
-```
+```bash
 kubectl delete dp southafrica-scheduled-outage-dataset -n data-products
 ```
 
-Operator will:
+Operator:
 
-* Remove entry from shared metadata ConfigMap
-* Or delete dedicated engine resources
-* Delete Ingress
-* Trigger engine reload
+* Cleans shared metadata
+* Removes ingress
+* Dedicated mode → deletes deployment, service, ConfigMap
+* Reloads shared engine if needed
 
 ---
 
-# 📚 Roadmap
+# 🗺️ Roadmap
 
-* `$filter` implementation
-* AuthZ via CRD (`spec.security`)
-* QoS policies (`spec.qos`)
-* Optional caching layer
-* Async streaming mode
-* Schema inference + validation
+### 📌 Engine
+
+* Full `$filter` grammar support (substring, functions)
+* Streaming response mode
+* Caching layer
+
+### 📌 Operator
+
+* Auto PVC provisioning for parquet files
+* Validate CR before applying
+* Live dataset status (`status.conditions`)
+
+### 📌 Security
+
+* Vault entitlements backend
+* Per-dataset rate limiting
