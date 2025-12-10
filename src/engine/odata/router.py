@@ -1,12 +1,15 @@
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from urllib.parse import urlencode
 import logging
 
 from .registry import list_products, get_runtime
 from .filter import apply_odata_query
+
+from ..security.dependency import get_current_principal
+from ..security.authorization import check_dataset_access
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,7 @@ def query_product(
     top: Optional[int] = Query(default=None, alias="$top"),
     skip: Optional[int] = Query(default=None, alias="$skip"),
     orderby: Optional[str] = Query(default=None, alias="$orderby"),
+    principal: Optional[dict] = Depends(get_current_principal),
 ):
     """
     Query the main (joined) dataset for a product.
@@ -104,6 +108,8 @@ def query_product(
     runtime = get_runtime(product_route)
     if runtime is None:
         raise HTTPException(status_code=404, detail=f"Unknown data product '{product_route}'")
+
+    check_dataset_access(runtime, principal)
 
     df = runtime.df
 
@@ -184,6 +190,7 @@ def query_product_source(
     top: Optional[int] = Query(default=None, alias="$top"),
     skip: Optional[int] = Query(default=None, alias="$skip"),
     orderby: Optional[str] = Query(default=None, alias="$orderby"),
+    principal: Optional[dict] = Depends(get_current_principal),
 ):
     """
     Query a raw backend source (e.g. 'areas', 'schedule') independently.
@@ -191,6 +198,8 @@ def query_product_source(
     runtime = get_runtime(product_route)
     if runtime is None:
         raise HTTPException(status_code=404, detail=f"Unknown data product '{product_route}'")
+
+    check_dataset_access(runtime, principal)
 
     if source_name not in runtime.raw:
         raise HTTPException(

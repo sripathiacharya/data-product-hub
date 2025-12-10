@@ -71,3 +71,5 @@ spec:
       - start_time
       - end_time
   deploymentMode: Shared
+  security:
+    authPolicy: "none"

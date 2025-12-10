@@ -18,7 +18,7 @@ engine:
   enabled: true
   image:
     repository: ghcr.io/sripathiacharya/data-product-hub-engine
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: Always
 
   replicaCount: 1
@@ -38,11 +38,17 @@ engine:
     port: 8000        # Service port (external inside the cluster)
     targetPort: 8000  # Container port
 
+  auth:
+    enabled: false
+    jwksUrl: "https://samples.auth0.com/.well-known/jwks.json"
+    issuer: "https://samples.auth0.com/"
+    algorithms: ["RS256"]
+
 operator:
   enabled: true
   image:
     repository: ghcr.io/sripathiacharya/data-product-hub-operator
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: Always
 
   replicaCount: 1

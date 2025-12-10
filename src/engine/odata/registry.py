@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from dataclasses import dataclass, field
 import os
 import json
@@ -57,6 +57,9 @@ class ODataConfig(BaseModel):
     orderable: List[str] = Field(default_factory=list)
 
 
+class SecurityConfig(BaseModel):
+    authPolicy: Literal["none", "optional", "required"] = "none"
+
 class DataProductConfig(BaseModel):
     id: str
     route: Optional[str] = None
@@ -70,7 +73,7 @@ class DataProductConfig(BaseModel):
     odata: ODataConfig = Field(default_factory=ODataConfig)
 
     # Extra metadata that engine may ignore for now but we keep in model
-    security: Dict[str, Any] = Field(default_factory=dict)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     qos: Dict[str, Any] = Field(default_factory=dict)
     deployment_mode: Optional[str] = None
 
