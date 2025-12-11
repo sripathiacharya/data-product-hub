@@ -1,17 +1,27 @@
-from typing import Optional
+# src/engine/odata/router.py
 
-import pandas as pd
-from fastapi import APIRouter, HTTPException, Query, Depends
-from urllib.parse import urlencode
+from typing import Optional, List, Tuple
+import json
 import logging
+from urllib.parse import urlencode
 
-from .registry import list_products, get_runtime
-from .filter import apply_odata_query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi.responses import StreamingResponse
+
+from .registry import (
+    list_products,
+    get_runtime,
+    get_duckdb_connection,
+)
+from .filter import build_where_clause
 
 from ..security.dependency import get_current_principal
 from ..security.authorization import check_dataset_access
 
 logger = logging.getLogger(__name__)
+
+# Obtain shared DuckDB connection & lock
+_DUCKDB_CONN, _DUCKDB_LOCK = get_duckdb_connection()
 
 
 # ------------------------------------------------------------------
@@ -65,6 +75,60 @@ def _build_next_link_base(
     return f"{base_path}?{urlencode(params)}"
 
 
+def _build_select_list(select: Optional[str]) -> str:
+    if not select:
+        return "*"
+    cols = [c.strip() for c in select.split(",") if c.strip()]
+    if not cols:
+        return "*"
+    return ", ".join(f'"{c}"' for c in cols)
+
+
+def _build_order_by(orderby: Optional[str]) -> str:
+    if not orderby:
+        return ""
+    # For now, expect clauses like "col" or "col desc"
+    items = [i.strip() for i in orderby.split(",") if i.strip()]
+    if not items:
+        return ""
+    # TODO: add identifier quoting if needed
+    return " ORDER BY " + ", ".join(items)
+
+
+def _build_sql_for_query(
+    base_view: str,
+    select: Optional[str],
+    filter_: Optional[str],
+    orderby: Optional[str],
+    top: Optional[int],
+    skip: Optional[int],
+) -> Tuple[str, List[object]]:
+    select_clause = _build_select_list(select)
+    where_clause, params = build_where_clause(filter_)
+    order_clause = _build_order_by(orderby)
+
+    limit_clause = ""
+    if top is not None:
+        limit_clause += f" LIMIT {int(top)}"
+    if skip is not None:
+        limit_clause += f" OFFSET {int(skip)}"
+
+    sql = f'SELECT {select_clause} FROM "{base_view}"'
+    if where_clause:
+        sql += f" WHERE {where_clause}"
+    sql += order_clause + limit_clause
+
+    return sql, params
+
+
+def _build_sql_for_count(base_view: str, filter_: Optional[str]) -> Tuple[str, List[object]]:
+    where_clause, params = build_where_clause(filter_)
+    sql = f'SELECT COUNT(*) AS cnt FROM "{base_view}"'
+    if where_clause:
+        sql += f" WHERE {where_clause}"
+    return sql, params
+
+
 # ------------------------------------------------------------------
 # Router + endpoints
 # ------------------------------------------------------------------
@@ -83,7 +147,7 @@ def get_metadata():
         products.append(
             {
                 "id": cfg.id,
-                "route": cfg.route,
+                "route": cfg.route_key,
                 "description": cfg.description,
                 "entity": cfg.entity.name,
             }
@@ -100,10 +164,15 @@ def query_product(
     top: Optional[int] = Query(default=None, alias="$top"),
     skip: Optional[int] = Query(default=None, alias="$skip"),
     orderby: Optional[str] = Query(default=None, alias="$orderby"),
+    count: Optional[bool] = Query(default=None, alias="$count"),
+    stream: Optional[bool] = Query(default=False, alias="$stream"),
     principal: Optional[dict] = Depends(get_current_principal),
 ):
     """
     Query the main (joined) dataset for a product.
+
+    If $stream=true, results are returned as a StreamingResponse where the JSON
+    payload is written incrementally.
     """
     runtime = get_runtime(product_route)
     if runtime is None:
@@ -111,51 +180,46 @@ def query_product(
 
     check_dataset_access(runtime, principal)
 
-    df = runtime.df
-
     logger.info(
-        "Query product=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r",
+        "Query product=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r $stream=%r",
         product_route,
         filter_,
         select,
         top,
         skip,
         orderby,
+        stream,
     )
 
-    # --- total count AFTER filter, BEFORE paging ---
-    df_filtered_for_count = apply_odata_query(
-        df=df,
-        select=None,
-        filter_expr=filter_,
-        top=None,
-        skip=None,
-        orderby=None,
-        entity=runtime.config.entity,
-    )
-    total_count = len(df_filtered_for_count)
-    logger.info("Filtered total_count=%s for product=%s", total_count, product_route)
-    print(f"Filtered total_count={total_count} for product={product_route}")
+    base_view = runtime.joined_view
 
-    # Apply default_top / max_top policy
+    # Compute OData paging limits
     eff_top = _effective_top(top, runtime)
 
-    # --- page data (filter + orderby + skip + top + select) ---
-    df_page = apply_odata_query(
-        df=df,
+    # --- total count AFTER filter, BEFORE paging (if requested) ---
+    total_count = None
+    if count or count is None:
+        # OData: $count=true or absence sometimes implies count; here we opt-in if $count=true
+        if count:
+            count_sql, count_params = _build_sql_for_count(base_view, filter_)
+            with _DUCKDB_LOCK:
+                cur = _DUCKDB_CONN.execute(count_sql, count_params)
+                total_count = cur.fetchone()[0]
+                logger.info("Filtered total_count=%s for product=%s", total_count, product_route)
+
+    # Build main query SQL
+    sql, params = _build_sql_for_query(
+        base_view=base_view,
         select=select,
-        filter_expr=filter_,
+        filter_=filter_,
+        orderby=orderby,
         top=eff_top,
         skip=skip,
-        orderby=orderby,
-        entity=runtime.config.entity,
     )
 
-    records = df_page.to_dict(orient="records")
-
-    # Build @odata.nextLink if there is another page AFTER filtering
+    # Pre-compute nextLink if we have a count and a top
     next_link = None
-    if eff_top is not None:
+    if total_count is not None and eff_top is not None:
         current_skip = skip or 0
         next_skip = current_skip + eff_top
         if next_skip < total_count:
@@ -169,15 +233,61 @@ def query_product(
                 top=eff_top,
             )
 
-    response = {
-        "@odata.context": f"/odata/$metadata#{product_route}",
-        "@odata.count": total_count,
-        "value": records,
-    }
-    if next_link:
-        response["@odata.nextLink"] = next_link
+    # ---------- Non-streaming path ----------
+    if not stream:
+        with _DUCKDB_LOCK:
+            cur = _DUCKDB_CONN.execute(sql, params)
+            rows = cur.fetchall()
+            columns = [d[0] for d in cur.description]
 
-    return response
+        def row_to_obj(row):
+            return {col: val for col, val in zip(columns, row)}
+
+        body = {
+            "@odata.context": f"/odata/$metadata#{product_route}",
+            "value": [row_to_obj(r) for r in rows],
+        }
+        if total_count is not None:
+            body["@odata.count"] = total_count
+        if next_link:
+            body["@odata.nextLink"] = next_link
+
+        return body
+
+    # ---------- Streaming path ----------
+    def row_iterator():
+        meta = {"@odata.context": f"/odata/$metadata#{product_route}"}
+        if total_count is not None:
+            meta["@odata.count"] = total_count
+        if next_link:
+            meta["@odata.nextLink"] = next_link
+
+        # Start JSON object and "value" array
+        head = json.dumps(meta, separators=(",", ":"))[:-1]  # strip closing '}'
+        yield head
+        yield ',"value":['
+
+        first = True
+        with _DUCKDB_LOCK:
+            cur = _DUCKDB_CONN.execute(sql, params)
+            columns = [d[0] for d in cur.description]
+
+            while True:
+                chunk = cur.fetchmany(1000)
+                if not chunk:
+                    break
+                for row in chunk:
+                    if not first:
+                        yield ","
+                    else:
+                        first = False
+                    obj = {col: val for col, val in zip(columns, row)}
+                    yield json.dumps(obj, default=str, separators=(",", ":"))
+
+        # Close array and object
+        yield "]}"
+
+    return StreamingResponse(row_iterator(), media_type="application/json")
 
 
 @router.get("/{product_route}/{source_name}")
@@ -190,6 +300,8 @@ def query_product_source(
     top: Optional[int] = Query(default=None, alias="$top"),
     skip: Optional[int] = Query(default=None, alias="$skip"),
     orderby: Optional[str] = Query(default=None, alias="$orderby"),
+    count: Optional[bool] = Query(default=None, alias="$count"),
+    stream: Optional[bool] = Query(default=False, alias="$stream"),
     principal: Optional[dict] = Depends(get_current_principal),
 ):
     """
@@ -201,16 +313,14 @@ def query_product_source(
 
     check_dataset_access(runtime, principal)
 
-    if source_name not in runtime.raw:
+    if source_name not in runtime.source_views:
         raise HTTPException(
             status_code=404,
             detail=f"Data source '{source_name}' not found for product '{product_route}'",
         )
 
-    df = runtime.raw[source_name]
-
     logger.info(
-        "Query source product=%s source=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r",
+        "Query source product=%s source=%s $filter=%r $select=%r $top=%r $skip=%r $orderby=%r $stream=%r",
         product_route,
         source_name,
         filter_,
@@ -218,42 +328,36 @@ def query_product_source(
         top,
         skip,
         orderby,
+        stream,
     )
 
-    # --- total count AFTER filter, BEFORE paging ---
-    df_filtered_for_count = apply_odata_query(
-        df=df,
-        select=None,
-        filter_expr=filter_,
-        top=None,
-        skip=None,
-        orderby=None,
-        entity=None,
-    )
-    total_count = len(df_filtered_for_count)
-    logger.info(
-        "Filtered total_count=%s for product=%s source=%s",
-        total_count,
-        product_route,
-        source_name,
-    )
-
+    base_view = runtime.source_views[source_name]
     eff_top = _effective_top(top, runtime)
 
-    df_page = apply_odata_query(
-        df=df,
+    total_count = None
+    if count:
+        count_sql, count_params = _build_sql_for_count(base_view, filter_)
+        with _DUCKDB_LOCK:
+            cur = _DUCKDB_CONN.execute(count_sql, count_params)
+            total_count = cur.fetchone()[0]
+            logger.info(
+                "Filtered total_count=%s for product=%s source=%s",
+                total_count,
+                product_route,
+                source_name,
+            )
+
+    sql, params = _build_sql_for_query(
+        base_view=base_view,
         select=select,
-        filter_expr=filter_,
+        filter_=filter_,
+        orderby=orderby,
         top=eff_top,
         skip=skip,
-        orderby=orderby,
-        entity=None,
     )
 
-    records = df_page.to_dict(orient="records")
-
     next_link = None
-    if eff_top is not None:
+    if total_count is not None and eff_top is not None:
         current_skip = skip or 0
         next_skip = current_skip + eff_top
         if next_skip < total_count:
@@ -267,12 +371,58 @@ def query_product_source(
                 top=eff_top,
             )
 
-    response = {
-        "@odata.context": f"/odata/$metadata#{product_route}/{source_name}",
-        "@odata.count": total_count,
-        "value": records,
-    }
-    if next_link:
-        response["@odata.nextLink"] = next_link
+    # Non-streaming
+    if not stream:
+        with _DUCKDB_LOCK:
+            cur = _DUCKDB_CONN.execute(sql, params)
+            rows = cur.fetchall()
+            columns = [d[0] for d in cur.description]
 
-    return response
+        records = [
+            {col: val for col, val in zip(columns, row)}
+            for row in rows
+        ]
+
+        response = {
+            "@odata.context": f"/odata/$metadata#{product_route}/{source_name}",
+            "value": records,
+        }
+        if total_count is not None:
+            response["@odata.count"] = total_count
+        if next_link:
+            response["@odata.nextLink"] = next_link
+
+        return response
+
+    # Streaming
+    def row_iterator():
+        meta = {"@odata.context": f"/odata/$metadata#{product_route}/{source_name}"}
+        if total_count is not None:
+            meta["@odata.count"] = total_count
+        if next_link:
+            meta["@odata.nextLink"] = next_link
+
+        head = json.dumps(meta, separators=(",", ":"))[:-1]
+        yield head
+        yield ',"value":['
+
+        first = True
+        with _DUCKDB_LOCK:
+            cur = _DUCKDB_CONN.execute(sql, params)
+            columns = [d[0] for d in cur.description]
+
+            while True:
+                chunk = cur.fetchmany(1000)
+                if not chunk:
+                    break
+                for row in chunk:
+                    if not first:
+                        yield ","
+                    else:
+                        first = False
+                    obj = {col: val for col, val in zip(columns, row)}
+                    yield json.dumps(obj, default=str, separators=(",", ":"))
+
+        yield "]}"  # close JSON
+
+    return StreamingResponse(row_iterator(), media_type="application/json")

@@ -1,15 +1,32 @@
+# src/engine/odata/registry.py
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 from dataclasses import dataclass, field
 import os
 import json
+import threading
 
-import pandas as pd
+import duckdb
 import yaml
 from pydantic import BaseModel, Field
 
 import logging
+
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------
+# DuckDB: single in-process connection & lock
+# ------------------------------------------------------------
+
+_DUCKDB_CONN = duckdb.connect(database=":memory:")
+_DUCKDB_LOCK = threading.Lock()
+
+
+def _quote_ident(name: str) -> str:
+    # Minimal identifier quoting for DuckDB
+    return '"' + str(name).replace('"', '""') + '"'
+
 
 # ------------------------------------------------------------
 # Pydantic configuration models
@@ -26,11 +43,13 @@ class JoinConfig(BaseModel):
     # 'on' should be optional but default to empty list
     on: List[str] = Field(default_factory=list)
 
+
 class APISpec(BaseModel):
     path: str
     protocol: str = "odata"
     resource: Optional[str] = None
     version: str = "v1"
+
 
 class BackendConfig(BaseModel):
     engine: str                           # e.g., "parquet_join"
@@ -59,6 +78,7 @@ class ODataConfig(BaseModel):
 
 class SecurityConfig(BaseModel):
     authPolicy: Literal["none", "optional", "required"] = "none"
+
 
 class DataProductConfig(BaseModel):
     id: str
@@ -95,24 +115,26 @@ class DataProductConfig(BaseModel):
         else:
             r = self.id
         return r.lstrip("/")
-    
+
+
 # ------------------------------------------------------------
-# Runtime model (not Pydantic)
+# Runtime model (no in-memory DataFrame)
 # ------------------------------------------------------------
 
 @dataclass
 class DataProductRuntime:
     config: DataProductConfig
-    df: pd.DataFrame
-    raw: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    joined_view: str                      # e.g., "dp_southafrica_scheduled_outage_joined"
+    source_views: Dict[str, str] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------
 # Internal registry for loaded products
 # ------------------------------------------------------------
 
-# key = route
+# key = route_key
 _REGISTRY: Dict[str, DataProductRuntime] = {}
+_REGISTRY_LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------
@@ -144,7 +166,8 @@ def load_config_dir(config_dir: Path) -> None:
     convenient fallback.
     """
     global _REGISTRY
-    _REGISTRY.clear()
+    with _REGISTRY_LOCK:
+        _REGISTRY.clear()
 
     for path in config_dir.glob("*.yaml"):
         with path.open("r", encoding="utf-8") as f:
@@ -153,8 +176,10 @@ def load_config_dir(config_dir: Path) -> None:
         cfg = DataProductConfig(**raw)
         repo_root = config_dir.parent.parent
         runtime = build_runtime(cfg, repo_root)
-        _REGISTRY[cfg.route] = runtime
-        print(f"[config] Loaded YAML config {cfg.id} (route={cfg.route})")
+        route = cfg.route_key
+        with _REGISTRY_LOCK:
+            _REGISTRY[route] = runtime
+        print(f"[config] Loaded YAML config {cfg.id} (route={route})")
 
 
 # ------------------------------------------------------------
@@ -170,7 +195,8 @@ def load_from_metadata_file(metadata_path: Path, repo_root: Optional[Path] = Non
 
     if not metadata_path.exists():
         print(f"[metadata] {metadata_path} not found, registry will be empty.")
-        _REGISTRY.clear()
+        with _REGISTRY_LOCK:
+            _REGISTRY.clear()
         return
 
     raw_text = metadata_path.read_text(encoding="utf-8")
@@ -218,10 +244,11 @@ def load_from_cr_manifest(cr_path: Path, repo_root: Optional[Path] = None) -> No
     repo_root_resolved = _resolve_repo_root(repo_root)
     runtime = build_runtime(cfg, repo_root_resolved)
 
-    _REGISTRY.clear()
-    _REGISTRY[cfg.route_key] = runtime
-    print(f"[local] Loaded DataProduct CR from {cr_path} (id={cfg.id}, route={cfg.route_key})")
+    with _REGISTRY_LOCK:
+        _REGISTRY.clear()
+        _REGISTRY[cfg.route_key] = runtime
 
+    print(f"[local] Loaded DataProduct CR from {cr_path} (id={cfg.id}, route={cfg.route_key})")
 
 
 # ------------------------------------------------------------
@@ -236,9 +263,9 @@ def _load_from_items(items: List[dict], repo_root: Optional[Path] = None) -> Non
     logged and skipped instead of crashing the whole engine.
     """
     global _REGISTRY
-    _REGISTRY.clear()
-
     repo_root_resolved = Path(repo_root) if repo_root else Path(".")
+
+    new_registry: Dict[str, DataProductRuntime] = {}
 
     for raw in items:
         try:
@@ -264,15 +291,17 @@ def _load_from_items(items: List[dict], repo_root: Optional[Path] = None) -> Non
             )
             continue
 
-        # Normalise route just in case (no leading '/')
         route = cfg.route_key
-        _REGISTRY[route] = runtime
+        new_registry[route] = runtime
+
+    with _REGISTRY_LOCK:
+        _REGISTRY = new_registry
 
     logger.info("Loaded %d data products into registry.", len(_REGISTRY))
 
 
 # ------------------------------------------------------------
-# Core: build runtime from config
+# Core: build runtime from config (create DuckDB views)
 # ------------------------------------------------------------
 
 def build_runtime(cfg: DataProductConfig, repo_root: Path) -> DataProductRuntime:
@@ -281,110 +310,93 @@ def build_runtime(cfg: DataProductConfig, repo_root: Path) -> DataProductRuntime
     if backend.engine != "parquet_join":
         raise ValueError(f"Unsupported backend engine: {backend.engine}")
 
-    # --------------------------------------------------------
-    # 1. Load all source parquet files
-    # --------------------------------------------------------
-    frames: Dict[str, pd.DataFrame] = {}
+    dp_id = cfg.id
+    base_view_prefix = f"dp_{dp_id.replace('-', '_')}"
+    source_views: Dict[str, str] = {}
 
-    for name, src in backend.sources.items():
-        full_path = repo_root / src.path
-        if not full_path.exists():
-            raise FileNotFoundError(f"Parquet not found for source '{name}': {full_path}")
+    with _DUCKDB_LOCK:
+        # 1. Create a view per source
+        for name, src in backend.sources.items():
+            view_name = f"{base_view_prefix}_{name}"
+            full_path = (repo_root / src.path).resolve()
 
-        df = pd.read_parquet(full_path)
+            if not full_path.exists():
+                raise FileNotFoundError(f"Parquet not found for source '{name}': {full_path}")
 
-        # apply rename
-        if src.rename:
-            df = df.rename(columns=src.rename)
+            if src.rename:
+                select_cols = [
+                    f"{_quote_ident(orig)} AS {_quote_ident(new)}"
+                    for orig, new in src.rename.items()
+                ]
+                select_clause = ", ".join(select_cols)
+            else:
+                select_clause = "*"
 
-        frames[name] = df
+            sql = f"""
+                CREATE OR REPLACE VIEW {_quote_ident(view_name)} AS
+                SELECT {select_clause}
+                FROM read_parquet('{full_path}');
+            """
+            logger.info("Creating source view for %s: %s", name, sql)
+            _DUCKDB_CONN.execute(sql)
+            source_views[name] = view_name
 
-    # --------------------------------------------------------
-    # 2. Apply joins in sequence
-    # --------------------------------------------------------
-    if backend.joins:
-        first_join = backend.joins[0]
-        base_name = first_join.left
-        if base_name not in frames:
-            raise ValueError(f"Unknown join base frame '{base_name}'")
+        # 2. Create joined view
+        if backend.joins:
+            first_join = backend.joins[0]
+            if first_join.left not in source_views:
+                raise ValueError(f"Unknown join base source '{first_join.left}'")
 
-        base_df = frames[base_name]
+            joined_view = f"{base_view_prefix}_joined"
 
-        for join in backend.joins:
+            # For now: single join chain, similar to previous pandas implementation
+            # (we use only first join as pattern; more can be added later)
+            join = backend.joins[0]
+            left_view = source_views[join.left]
+            right_view = source_views[join.right]
+
             if not join.on:
                 raise ValueError(
                     f"Join between '{join.left}' and '{join.right}' has no 'on:' columns configured"
                 )
 
-            if join.left == base_name:
-                left_df = base_df
-            else:
-                left_df = frames[join.left]
-
-            right_df = frames[join.right]
-
-            base_df = left_df.merge(
-                right_df,
-                on=join.on,
-                how="inner",
+            on_clause = " AND ".join(
+                f"L.{_quote_ident(col)} = R.{_quote_ident(col)}" for col in join.on
             )
 
-        df = base_df
+            sql_joined = f"""
+                CREATE OR REPLACE VIEW {_quote_ident(joined_view)} AS
+                SELECT L.*, R.*
+                FROM {_quote_ident(left_view)} AS L
+                JOIN {_quote_ident(right_view)} AS R
+                  ON {on_clause};
+            """
+            logger.info("Creating joined view for %s: %s", cfg.id, sql_joined)
+            _DUCKDB_CONN.execute(sql_joined)
+        else:
+            # No joins: expect a single source
+            if len(source_views) != 1:
+                raise ValueError("Multiple sources provided but no joins defined.")
+            # Pick the single source as the joined_view
+            joined_view = next(iter(source_views.values()))
 
-    else:
-        # no joins: must be exactly one source
-        if len(frames) != 1:
-            raise ValueError("Multiple sources provided but no joins defined.")
-        df = next(iter(frames.values()))
-
-    # --------------------------------------------------------
-    # 3. Enforce expected columns & generate missing key column
-    # --------------------------------------------------------
-
-    for col in cfg.entity.columns:
-        if not col.generated and col.name not in df.columns:
-            raise ValueError(
-                f"Required column '{col.name}' missing after joins in product '{cfg.id}'"
-            )
-
-    key_col = cfg.entity.key_column
-    if key_col not in df.columns:
-        df = df.reset_index(drop=True)
-        df[key_col] = df.index.astype(str)
-
-    # --------------------------------------------------------
-    # 4. Apply type conversions
-    # --------------------------------------------------------
-    for col in cfg.entity.columns:
-        name = col.name
-        if col.generated:
-            continue
-        if name not in df.columns:
-            continue
-
-        if col.type == "datetime":
-            df[name] = pd.to_datetime(df[name])
-        elif col.type == "int":
-            df[name] = pd.to_numeric(df[name], errors="coerce").astype("Int64")
-        elif col.type == "float":
-            df[name] = pd.to_numeric(df[name], errors="coerce")
-        elif col.type == "string":
-            df[name] = df[name].astype(str)
-
-    return DataProductRuntime(config=cfg, df=df, raw=frames)
+    return DataProductRuntime(config=cfg, joined_view=joined_view, source_views=source_views)
 
 
 # ------------------------------------------------------------
 # Public API for router
 # ------------------------------------------------------------
 
-def get_runtime(route: str) -> DataProductRuntime:
+def get_runtime(route: str) -> Optional[DataProductRuntime]:
     key = route.lstrip("/")
-    if key not in _REGISTRY:
-        raise KeyError(f"Data product route '{route}' not found")
-    return _REGISTRY[key]
+    with _REGISTRY_LOCK:
+        return _REGISTRY.get(key)
 
 
+def list_products() -> List[DataProductRuntime]:
+    with _REGISTRY_LOCK:
+        return list(_REGISTRY.values())
 
-def list_products() -> List[DataProductConfig]:
-    return [rt.config for rt in _REGISTRY.values()]
+
+def get_duckdb_connection():
+    return _DUCKDB_CONN, _DUCKDB_LOCK

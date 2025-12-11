@@ -8,7 +8,10 @@ metadata:
     app.kubernetes.io/component: engine
 spec:
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteMany
+  {{- if .Values.engine.dataVolume.volumeName }}
+  volumeName: {{ .Values.engine.dataVolume.volumeName | quote }}
+  {{- end }}
   {{- if .Values.engine.dataVolume.storageClassName }}
   storageClassName: {{ .Values.engine.dataVolume.storageClassName | quote }}
   {{- end }}
